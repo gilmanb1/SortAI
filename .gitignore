@@ -1,0 +1,195 @@
+# =============================================================================
+# SortAI .gitignore
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Swift & Xcode
+# -----------------------------------------------------------------------------
+# Build artifacts
+.build/
+build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Xcode state files
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Swift Package Manager
+.swiftpm/
+Package.resolved
+
+# -----------------------------------------------------------------------------
+# macOS System Files
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# -----------------------------------------------------------------------------
+# IDE & Editor Files
+# -----------------------------------------------------------------------------
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# Vim
+*.vim
+Session.vim
+.netrwhist
+
+# -----------------------------------------------------------------------------
+# Custom SQLite Build
+# -----------------------------------------------------------------------------
+# The .local/sqlite directory contains custom SQLite with SQLITE_ENABLE_SNAPSHOT
+# This is required for GRDB snapshots and must be built locally.
+#
+# To set up (first time only):
+#   1. Download SQLite amalgamation from https://sqlite.org/download.html
+#   2. Extract to .local/sqlite/sqlite-amalgamation-<version>/
+#   3. Run ./build_sqlite.sh in that directory
+#   4. Then run ./build.sh from project root
+#
+# We exclude the entire .local directory but keep the build script in repo.
+.local/
+
+# -----------------------------------------------------------------------------
+# Cursor IDE
+# -----------------------------------------------------------------------------
+.cursorindexingignore
+.cursorrules
+.cursor/
+
+# Specstory (AI conversation history)
+.specstory/
+
+# -----------------------------------------------------------------------------
+# Application Data & Caches
+# -----------------------------------------------------------------------------
+# User-specific config (generated at runtime)
+~/.sortai/
+
+# Application databases (regenerated at runtime)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+/tmp/
+
+# Coverage data
+*.profraw
+*.profdata
+default.profraw
+
+# -----------------------------------------------------------------------------
+# Test Artifacts
+# -----------------------------------------------------------------------------
+# Test output
+TestResults/
+test_output/
+*.xcresult
+
+# Test organization output (temporary organized folders)
+Tests/Fixtures/TestOutput/
+
+# -----------------------------------------------------------------------------
+# Build Artifacts & Binaries
+# -----------------------------------------------------------------------------
+# Compiled binaries
+*.o
+*.a
+*.dylib
+*.so
+*.exe
+
+# App bundles (except intentional releases)
+*.app
+
+# Debug symbols
+*.dSYM/
+*.dSYM.zip
+
+# Code signing
+*.mobileprovision
+*.p12
+*.cer
+
+# -----------------------------------------------------------------------------
+# Secrets & Credentials (NEVER commit these)
+# -----------------------------------------------------------------------------
+*.pem
+*.key
+*.env
+*.env.local
+*.env.*.local
+secrets/
+credentials/
+.secrets
+
+# API keys
+api_keys.json
+config.local.json
+
+# -----------------------------------------------------------------------------
+# Documentation Artifacts
+# -----------------------------------------------------------------------------
+# Generated docs
+docs/_build/
+.docs/
+*.docset
+
+# -----------------------------------------------------------------------------
+# Miscellaneous
+# -----------------------------------------------------------------------------
+# Archives
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Unless they're part of test fixtures
+!Tests/Fixtures/**/*.zip
+
+# Backup files
+*.bak
+*.backup
+
+# Screenshot captures (from testing)
+/tmp/*.png
+
+# Crash logs
+*.crash
+*.ips
+
+# User-specific test directories
+# (Set via SORTAI_TEST_MAGIC_DIR environment variable)
+

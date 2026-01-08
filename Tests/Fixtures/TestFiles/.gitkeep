@@ -1,0 +1,5 @@
+# Test Files Directory
+
+This directory contains test files for functional testing.
+Files are organized during tests and reset to flat structure afterwards.
+
