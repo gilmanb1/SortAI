@@ -114,10 +114,22 @@ final class RecordRepository: Sendable {
         }
     }
     
+    /// Alias for count() - counts all records
+    func countAll() throws -> Int {
+        try count()
+    }
+    
     /// Counts records by category
     func countByCategory(_ category: String) throws -> Int {
         try database.read { db in
             try ProcessingRecord.filter(Column("assignedCategory") == category).fetchCount(db)
+        }
+    }
+    
+    /// Deletes all records
+    func deleteAll() throws -> Int {
+        try database.write { db in
+            try ProcessingRecord.deleteAll(db)
         }
     }
     

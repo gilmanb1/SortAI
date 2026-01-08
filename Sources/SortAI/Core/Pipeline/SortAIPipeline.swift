@@ -206,12 +206,19 @@ actor SortAIPipeline: FileProcessing {
             try? memoryStore.recordHit(patternId: existingPattern.id)
             memoryHitCount += 1
             
+            // Parse the stored label back into a CategoryPath
+            // The label is stored as "Main / Sub1 / Sub2" format
+            let storedPath = CategoryPath(path: existingPattern.label, separator: " / ")
+            let subcategories = Array(storedPath.components.dropFirst())
+            
             return ProcessingResult(
                 signature: signature,
                 brainResult: BrainResult(
-                    category: existingPattern.label,
+                    category: storedPath.root,
+                    subcategory: subcategories.first,
                     confidence: existingPattern.confidence,
-                    rationale: "Matched from memory (exact file)"
+                    rationale: "Matched from memory (exact file)",
+                    allSubcategories: subcategories
                 ),
                 wasFromMemory: true
             )
@@ -230,12 +237,18 @@ actor SortAIPipeline: FileProcessing {
             try? memoryStore.recordHit(patternId: match.0.id)
             memoryHitCount += 1
             
+            // Parse the stored label back into a CategoryPath
+            let storedPath = CategoryPath(path: match.0.label, separator: " / ")
+            let subcategories = Array(storedPath.components.dropFirst())
+            
             let result = ProcessingResult(
                 signature: signature,
                 brainResult: BrainResult(
-                    category: match.0.label,
+                    category: storedPath.root,
+                    subcategory: subcategories.first,
                     confidence: match.1,
-                    rationale: "Matched from memory (\(Int(match.1 * 100))% similar)"
+                    rationale: "Matched from memory (\(Int(match.1 * 100))% similar)",
+                    allSubcategories: subcategories
                 ),
                 wasFromMemory: true
             )
@@ -482,12 +495,18 @@ actor SortAIPipeline: FileProcessing {
             try? memoryStore.recordHit(patternId: existingPattern.id)
             memoryHitCount += 1
             
+            // Parse the stored label back into a CategoryPath
+            let storedPath = CategoryPath(path: existingPattern.label, separator: " / ")
+            let subcategories = Array(storedPath.components.dropFirst())
+            
             let result = ProcessingResult(
                 signature: signature,
                 brainResult: BrainResult(
-                    category: existingPattern.label,
+                    category: storedPath.root,
+                    subcategory: subcategories.first,
                     confidence: existingPattern.confidence,
-                    rationale: "Matched from memory (exact file)"
+                    rationale: "Matched from memory (exact file)",
+                    allSubcategories: subcategories
                 ),
                 wasFromMemory: true
             )
@@ -507,12 +526,18 @@ actor SortAIPipeline: FileProcessing {
             try? memoryStore.recordHit(patternId: match.0.id)
             memoryHitCount += 1
             
+            // Parse the stored label back into a CategoryPath
+            let storedPath = CategoryPath(path: match.0.label, separator: " / ")
+            let subcategories = Array(storedPath.components.dropFirst())
+            
             let result = ProcessingResult(
                 signature: signature,
                 brainResult: BrainResult(
-                    category: match.0.label,
+                    category: storedPath.root,
+                    subcategory: subcategories.first,
                     confidence: match.1,
-                    rationale: "Matched from memory (\(Int(match.1 * 100))% similar)"
+                    rationale: "Matched from memory (\(Int(match.1 * 100))% similar)",
+                    allSubcategories: subcategories
                 ),
                 wasFromMemory: true
             )

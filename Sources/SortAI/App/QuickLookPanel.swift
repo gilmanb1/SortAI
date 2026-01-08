@@ -5,8 +5,339 @@ import SwiftUI
 import QuickLookUI
 import Quartz
 import AVKit
+import AppKit
 
-// MARK: - QuickLook Panel View
+// MARK: - Native QuickLook Controller (System QLPreviewPanel)
+
+/// Singleton controller for the native macOS QuickLook panel (like Finder's spacebar preview)
+/// Usage:
+///   - QuickLookController.shared.show(url:) for single file
+///   - QuickLookController.shared.show(urls:currentIndex:) for multiple files with cycling
+///   - QuickLookController.shared.toggle(url:) to toggle visibility
+///   - QuickLookController.shared.close() to dismiss
+final class QuickLookController: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelegate, @unchecked Sendable {
+    
+    /// Shared singleton instance (access from main thread)
+    @MainActor static let shared = QuickLookController()
+    
+    /// Currently previewed URLs (thread-safe access via lock)
+    private var _previewURLs: [URL] = []
+    private var _currentIndex: Int = 0
+    private let lock = NSLock()
+    
+    var previewURLs: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _previewURLs
+    }
+    
+    var currentIndex: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _currentIndex
+    }
+    
+    /// Whether the panel is currently visible
+    @MainActor var isVisible: Bool {
+        QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible
+    }
+    
+    private override init() {
+        super.init()
+    }
+    
+    private func setURLs(_ urls: [URL], index: Int) {
+        lock.lock()
+        _previewURLs = urls
+        _currentIndex = index
+        lock.unlock()
+    }
+    
+    private func setCurrentIndex(_ index: Int) {
+        lock.lock()
+        _currentIndex = index
+        lock.unlock()
+    }
+    
+    // MARK: - Public API
+    
+    /// Show the QuickLook panel for a single file
+    @MainActor func show(url: URL) {
+        show(urls: [url], currentIndex: 0)
+    }
+    
+    /// Show the QuickLook panel for multiple files
+    /// - Parameters:
+    ///   - urls: Array of file URLs to preview
+    ///   - currentIndex: Index of the initially selected file (default: 0)
+    @MainActor func show(urls: [URL], currentIndex: Int = 0) {
+        guard !urls.isEmpty else { return }
+        
+        setURLs(urls, index: min(currentIndex, urls.count - 1))
+        
+        // Ensure the panel exists and configure it
+        let panel = QLPreviewPanel.shared()!
+        panel.dataSource = self
+        panel.delegate = self
+        
+        // Bring app to front and show panel
+        NSApp.activate(ignoringOtherApps: true)
+        
+        if !panel.isVisible {
+            panel.makeKeyAndOrderFront(nil)
+        }
+        
+        // Refresh to show current item
+        panel.reloadData()
+        panel.refreshCurrentPreviewItem()
+    }
+    
+    /// Toggle the QuickLook panel for a single file
+    @MainActor func toggle(url: URL) {
+        toggle(urls: [url], currentIndex: 0)
+    }
+    
+    /// Toggle the QuickLook panel for multiple files
+    @MainActor func toggle(urls: [URL], currentIndex: Int = 0) {
+        if isVisible {
+            // If showing same files, close; otherwise update
+            if previewURLs == urls {
+                close()
+            } else {
+                show(urls: urls, currentIndex: currentIndex)
+            }
+        } else {
+            show(urls: urls, currentIndex: currentIndex)
+        }
+    }
+    
+    /// Close the QuickLook panel
+    @MainActor func close() {
+        if QLPreviewPanel.sharedPreviewPanelExists() {
+            QLPreviewPanel.shared().close()
+        }
+        setURLs([], index: 0)
+    }
+    
+    /// Update the URLs without closing/reopening the panel
+    @MainActor func updateURLs(_ urls: [URL], currentIndex: Int? = nil) {
+        let current = self.currentIndex
+        let newIndex: Int
+        if let index = currentIndex {
+            newIndex = min(index, urls.count - 1)
+        } else if current >= urls.count {
+            newIndex = max(0, urls.count - 1)
+        } else {
+            newIndex = current
+        }
+        setURLs(urls, index: newIndex)
+        
+        if isVisible {
+            QLPreviewPanel.shared().reloadData()
+            QLPreviewPanel.shared().refreshCurrentPreviewItem()
+        }
+    }
+    
+    /// Navigate to the next item
+    @MainActor func next() {
+        let urls = previewURLs
+        guard urls.count > 1 else { return }
+        let newIndex = (currentIndex + 1) % urls.count
+        setCurrentIndex(newIndex)
+        if isVisible {
+            QLPreviewPanel.shared().reloadData()
+            QLPreviewPanel.shared().refreshCurrentPreviewItem()
+        }
+    }
+    
+    /// Navigate to the previous item
+    @MainActor func previous() {
+        let urls = previewURLs
+        guard urls.count > 1 else { return }
+        let newIndex = (currentIndex - 1 + urls.count) % urls.count
+        setCurrentIndex(newIndex)
+        if isVisible {
+            QLPreviewPanel.shared().reloadData()
+            QLPreviewPanel.shared().refreshCurrentPreviewItem()
+        }
+    }
+    
+    // MARK: - QLPreviewPanelDataSource
+    
+    nonisolated func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        return previewURLs.count
+    }
+    
+    nonisolated func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
+        let urls = previewURLs
+        guard index >= 0 && index < urls.count else { return nil }
+        return urls[index] as NSURL
+    }
+    
+    // MARK: - QLPreviewPanelDelegate
+    
+    nonisolated func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
+        // Handle keyboard navigation
+        if event.type == .keyDown {
+            switch event.keyCode {
+            case 123: // Left arrow
+                DispatchQueue.main.async { [weak self] in
+                    self?.navigatePrevious()
+                }
+                return true
+            case 124: // Right arrow
+                DispatchQueue.main.async { [weak self] in
+                    self?.navigateNext()
+                }
+                return true
+            case 49: // Space - close panel (like Finder)
+                DispatchQueue.main.async { [weak self] in
+                    self?.closePanel()
+                }
+                return true
+            default:
+                break
+            }
+        }
+        return false
+    }
+    
+    // Non-isolated helpers for dispatch queue calls
+    private func navigatePrevious() {
+        let urls = previewURLs
+        guard urls.count > 1 else { return }
+        let newIndex = (currentIndex - 1 + urls.count) % urls.count
+        setCurrentIndex(newIndex)
+        if QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible {
+            QLPreviewPanel.shared().reloadData()
+            QLPreviewPanel.shared().refreshCurrentPreviewItem()
+        }
+    }
+    
+    private func navigateNext() {
+        let urls = previewURLs
+        guard urls.count > 1 else { return }
+        let newIndex = (currentIndex + 1) % urls.count
+        setCurrentIndex(newIndex)
+        if QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible {
+            QLPreviewPanel.shared().reloadData()
+            QLPreviewPanel.shared().refreshCurrentPreviewItem()
+        }
+    }
+    
+    private func closePanel() {
+        if QLPreviewPanel.sharedPreviewPanelExists() {
+            QLPreviewPanel.shared().close()
+        }
+        setURLs([], index: 0)
+    }
+    
+    nonisolated func previewPanel(_ panel: QLPreviewPanel!, sourceFrameOnScreenFor item: (any QLPreviewItem)!) -> NSRect {
+        // Return zero rect to use default animation
+        return .zero
+    }
+}
+
+// MARK: - SwiftUI Integration
+
+/// View modifier that enables Space key to toggle QuickLook for selected items
+struct QuickLookKeyHandler: ViewModifier {
+    let urls: [URL]
+    let currentIndex: Int
+    
+    init(urls: [URL], currentIndex: Int = 0) {
+        self.urls = urls
+        self.currentIndex = currentIndex
+    }
+    
+    init(url: URL?) {
+        self.urls = url.map { [$0] } ?? []
+        self.currentIndex = 0
+    }
+    
+    func body(content: Content) -> some View {
+        content
+            .onKeyPress(.space) {
+                if !urls.isEmpty {
+                    QuickLookController.shared.toggle(urls: urls, currentIndex: currentIndex)
+                    return .handled
+                }
+                return .ignored
+            }
+    }
+}
+
+extension View {
+    /// Enable Space key to toggle QuickLook preview for the given URL
+    func quickLookPreview(url: URL?) -> some View {
+        self.modifier(QuickLookKeyHandler(url: url))
+    }
+    
+    /// Enable Space key to toggle QuickLook preview for multiple URLs with cycling
+    func quickLookPreview(urls: [URL], currentIndex: Int = 0) -> some View {
+        self.modifier(QuickLookKeyHandler(urls: urls, currentIndex: currentIndex))
+    }
+}
+
+// MARK: - QuickLook Button
+
+/// A button that triggers the native QuickLook panel
+struct QuickLookButton: View {
+    let url: URL?
+    let urls: [URL]
+    let currentIndex: Int
+    
+    init(url: URL?) {
+        self.url = url
+        self.urls = url.map { [$0] } ?? []
+        self.currentIndex = 0
+    }
+    
+    init(urls: [URL], currentIndex: Int = 0) {
+        self.url = urls.first
+        self.urls = urls
+        self.currentIndex = currentIndex
+    }
+    
+    var body: some View {
+        Button {
+            if !urls.isEmpty {
+                QuickLookController.shared.toggle(urls: urls, currentIndex: currentIndex)
+            }
+        } label: {
+            Image(systemName: "eye")
+        }
+        .buttonStyle(.borderless)
+        .help("Quick Look (Space)")
+        .disabled(urls.isEmpty)
+    }
+}
+
+// MARK: - Clickable Preview Icon
+
+/// A file icon that opens QuickLook when clicked
+struct QuickLookIcon: View {
+    let url: URL
+    let size: CGFloat
+    
+    init(url: URL, size: CGFloat = 32) {
+        self.url = url
+        self.size = size
+    }
+    
+    var body: some View {
+        Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+            .resizable()
+            .frame(width: size, height: size)
+            .onTapGesture {
+                QuickLookController.shared.toggle(url: url)
+            }
+            .help("Click to preview")
+            .contentShape(Rectangle())
+    }
+}
+
+// MARK: - QuickLook Panel View (Custom Embedded Panel)
 
 /// A dedicated panel for previewing files, similar to Finder's spacebar preview
 struct QuickLookPanel: View {

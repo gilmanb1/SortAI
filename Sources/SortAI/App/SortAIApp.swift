@@ -6,7 +6,6 @@ import os.log
 
 private let logger = Logger(subsystem: "com.sortai.app", category: "lifecycle")
 
-@main
 struct SortAIApp: App {
     @State private var appState = AppState()
     @StateObject private var menuBarStatusManager = MenuBarStatusManager()

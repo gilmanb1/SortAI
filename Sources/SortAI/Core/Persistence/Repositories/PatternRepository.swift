@@ -110,6 +110,18 @@ final class PatternRepository: Sendable {
         }
     }
     
+    /// Alias for count() - counts all patterns
+    func countAll() throws -> Int {
+        try count()
+    }
+    
+    /// Deletes all patterns
+    func deleteAll() throws -> Int {
+        try database.write { db in
+            try LearnedPattern.deleteAll(db)
+        }
+    }
+    
     // MARK: - Vector Similarity Operations
     
     /// Queries patterns by vector similarity (k-nearest neighbors)

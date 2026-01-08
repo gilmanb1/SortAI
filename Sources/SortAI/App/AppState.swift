@@ -479,6 +479,80 @@ final class AppState {
         UserDefaults.standard.set(url.path, forKey: "lastOutputFolder")
     }
     
+    // MARK: - Batch Organization
+    
+    /// Items pending review
+    var pendingReviewItems: [ProcessingItem] {
+        items.filter { $0.status == .reviewing }
+    }
+    
+    /// Items that are accepted but not yet organized
+    var acceptedUnorganizedItems: [ProcessingItem] {
+        items.filter { $0.status == .accepted }
+    }
+    
+    /// Count of items accepted but not yet organized
+    var acceptedUnorganizedCount: Int {
+        acceptedUnorganizedItems.count
+    }
+    
+    /// Whether there are items ready to be organized
+    var hasItemsToOrganize: Bool {
+        !pendingReviewItems.isEmpty || !acceptedUnorganizedItems.isEmpty
+    }
+    
+    /// Accept and organize all pending review items
+    func acceptAllPendingItems() {
+        let pending = pendingReviewItems
+        NSLog("📋 [AppState] Accepting all %d pending review items", pending.count)
+        
+        for item in pending {
+            confirmItem(item)
+        }
+    }
+    
+    /// Organize all accepted items that haven't been organized yet
+    func organizeAllAcceptedItems() {
+        let accepted = acceptedUnorganizedItems
+        NSLog("📋 [AppState] Organizing all %d accepted items", accepted.count)
+        
+        Task {
+            for item in accepted {
+                do {
+                    try await organizeItem(item)
+                } catch {
+                    item.status = .failed("Organization failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    
+    /// Accept and organize a specific set of items by their IDs
+    func confirmItems(_ itemIds: Set<Int64>) {
+        let itemsToConfirm = items.filter { 
+            if let feedbackId = $0.feedbackItem?.id {
+                return itemIds.contains(feedbackId)
+            }
+            return false
+        }
+        
+        NSLog("📋 [AppState] Confirming %d items from batch review", itemsToConfirm.count)
+        
+        for item in itemsToConfirm {
+            confirmItem(item)
+        }
+    }
+    
+    /// Skip a set of items (mark as skipped without organizing)
+    func skipItems(_ itemIds: Set<Int64>) {
+        for item in items {
+            if let feedbackId = item.feedbackItem?.id, itemIds.contains(feedbackId) {
+                item.feedbackItem?.status = .skipped
+                item.status = .completed  // Mark as done (skipped)
+            }
+        }
+    }
+    
     func reset() {
         items = []
         selectedItemIds = []

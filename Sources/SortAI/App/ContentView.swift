@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var isDragOver = false
     @State private var showingReviewForItem: ProcessingItem?
     @State private var showingWizard = false
+    @State private var showingBatchReview = false
     @State private var isFirstLaunch: Bool = !UserDefaults.standard.bool(forKey: "hasCompletedFirstLaunch")
     
     var body: some View {
@@ -44,6 +45,9 @@ struct ContentView: View {
         }
         .sheet(item: $showingReviewForItem) { item in
             reviewSheet(item: item)
+        }
+        .sheet(isPresented: $showingBatchReview) {
+            batchReviewSheet
         }
         .sheet(isPresented: $showingWizard) {
             wizardSheet
@@ -202,11 +206,22 @@ struct ContentView: View {
                 }
             }
             .listStyle(.plain)
+            // Enable Space key to toggle QuickLook for selected items (or all if none selected)
+            .quickLookPreview(urls: quickLookURLs, currentIndex: 0)
             
             // Bulk edit panel (shown when items are selected)
             if appState.hasSelection {
                 BulkEditPanel()
             }
+        }
+    }
+    
+    /// URLs for QuickLook preview - selected items if any, otherwise all items
+    private var quickLookURLs: [URL] {
+        if appState.hasSelection {
+            return appState.selectedItems.map(\.url)
+        } else {
+            return appState.items.map(\.url)
         }
     }
     
@@ -274,7 +289,31 @@ struct ContentView: View {
                     statLabel(value: appState.successCount, icon: "checkmark.circle", color: .green)
                     statLabel(value: appState.failureCount, icon: "exclamationmark.triangle", color: .red)
                     if appState.pendingReviewCount > 0 {
-                        statLabel(value: appState.pendingReviewCount, icon: "person.badge.key", color: .orange)
+                        // Clickable pending review count - opens batch review
+                        Button {
+                            showingBatchReview = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "person.badge.key")
+                                Text("\(appState.pendingReviewCount)")
+                            }
+                            .font(.caption2)
+                            .fontWeight(.bold)
+                            .foregroundStyle(.orange)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Click to review \(appState.pendingReviewCount) pending items")
+                    }
+                    // Show accepted-but-not-organized count
+                    if appState.acceptedUnorganizedCount > 0 {
+                        HStack(spacing: 4) {
+                            Image(systemName: "tray.full")
+                            Text("\(appState.acceptedUnorganizedCount)")
+                        }
+                        .font(.caption2)
+                        .fontWeight(.bold)
+                        .foregroundStyle(.blue)
+                        .help("\(appState.acceptedUnorganizedCount) files ready to organize")
                     }
                 }
             } else if appState.modelStatus.isReady {
@@ -285,20 +324,71 @@ struct ContentView: View {
             
             Spacer()
             
+            // Action buttons
             if appState.isProcessing {
                 ProgressView()
                     .controlSize(.small)
-            } else if !appState.items.isEmpty {
-                Button("Clear All") {
-                    appState.reset()
+            } else {
+                HStack(spacing: 12) {
+                    // Review All button (when there are pending items)
+                    if appState.pendingReviewCount > 0 {
+                        Button {
+                            showingBatchReview = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "list.bullet.clipboard")
+                                Text("Review All")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        
+                        // Accept All button
+                        Button {
+                            appState.acceptAllPendingItems()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                Text("Accept All")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .tint(.green)
+                        .help("Accept all pending items and organize them")
+                    }
+                    
+                    // Organize Files button (when there are accepted but unorganized items)
+                    // This handles the case where files hit cache and are auto-accepted
+                    if appState.acceptedUnorganizedCount > 0 && appState.pendingReviewCount == 0 {
+                        Button {
+                            appState.organizeAllAcceptedItems()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "folder.badge.plus")
+                                Text("Organize Files (\(appState.acceptedUnorganizedCount))")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .help("Organize all accepted files to the output folder")
+                        .disabled(appState.outputFolder == nil)
+                    }
+                    
+                    // Clear All button
+                    if !appState.items.isEmpty {
+                        Button("Clear All") {
+                            appState.reset()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
+                    }
                 }
-                .buttonStyle(.plain)
-                .font(.caption)
-                .foregroundStyle(Color.accentColor)
             }
         }
         .padding(.horizontal)
-        .frame(height: 32)
+        .frame(height: 36)
         .background(Color.secondary.opacity(0.05))
     }
     
@@ -374,6 +464,102 @@ struct ContentView: View {
     }
     
     // MARK: - Sheets
+    
+    // MARK: - Batch Review Sheet
+    
+    @MainActor
+    private var batchReviewSheet: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("Review Pending Items")
+                    .font(.headline)
+                
+                Spacer()
+                
+                Text("\(appState.pendingReviewCount) items")
+                    .foregroundStyle(.secondary)
+                
+                Button {
+                    showingBatchReview = false
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.escape, modifiers: [])
+            }
+            .padding()
+            
+            Divider()
+            
+            // List of pending items
+            if appState.pendingReviewItems.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 64))
+                        .foregroundStyle(.green)
+                    
+                    Text("All Items Reviewed!")
+                        .font(.title2)
+                    
+                    Button("Done") {
+                        showingBatchReview = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(appState.pendingReviewItems) { item in
+                        BatchReviewItemRow(
+                            item: item,
+                            onReview: {
+                                showingBatchReview = false
+                                showingReviewForItem = item
+                            },
+                            onAccept: {
+                                appState.confirmItem(item)
+                            }
+                        )
+                    }
+                }
+                .listStyle(.plain)
+            }
+            
+            Divider()
+            
+            // Footer actions
+            HStack {
+                Button("Skip All") {
+                    for item in appState.pendingReviewItems {
+                        item.feedbackItem?.status = .skipped
+                        item.status = .completed
+                    }
+                    showingBatchReview = false
+                }
+                .buttonStyle(.bordered)
+                
+                Spacer()
+                
+                Button {
+                    appState.acceptAllPendingItems()
+                    showingBatchReview = false
+                } label: {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                        Text("Accept All (\(appState.pendingReviewCount))")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .disabled(appState.pendingReviewItems.isEmpty)
+            }
+            .padding()
+        }
+        .frame(minWidth: 600, minHeight: 500)
+    }
     
     private func reviewSheet(item: ProcessingItem) -> some View {
         VStack(spacing: 0) {
@@ -486,18 +672,19 @@ struct ItemRowView: View {
                     }
             }
             
-            // Status Icon with Activity Indicator
-            ZStack {
-                Circle()
-                    .fill(item.status.color.opacity(0.15))
-                    .frame(width: 36, height: 36)
-                
-                Image(systemName: item.status.icon)
-                    .foregroundStyle(item.status.color)
-                    .font(.system(size: 16, weight: .bold))
-                
-                // Spinning indicator for active states
-                if item.status.isActive {
+            // File icon with QuickLook on click (when not processing)
+            if item.status.isActive {
+                // Status Icon with Activity Indicator for active states
+                ZStack {
+                    Circle()
+                        .fill(item.status.color.opacity(0.15))
+                        .frame(width: 36, height: 36)
+                    
+                    Image(systemName: item.status.icon)
+                        .foregroundStyle(item.status.color)
+                        .font(.system(size: 16, weight: .bold))
+                    
+                    // Spinning indicator for active states
                     Circle()
                         .trim(from: 0, to: 0.3)
                         .stroke(item.status.color, lineWidth: 2)
@@ -509,6 +696,22 @@ struct ItemRowView: View {
                             }
                         }
                 }
+            } else {
+                // Clickable file icon for QuickLook preview
+                QuickLookIcon(url: item.url, size: 36)
+                    .overlay {
+                        // Small status badge in corner
+                        Circle()
+                            .fill(item.status.color)
+                            .frame(width: 12, height: 12)
+                            .overlay {
+                                Image(systemName: item.status == .completed ? "checkmark" : 
+                                                  item.status == .reviewing ? "person.fill" : "")
+                                    .font(.system(size: 6, weight: .bold))
+                                    .foregroundStyle(.white)
+                            }
+                            .offset(x: 12, y: 12)
+                    }
             }
             
             // File Details
@@ -577,20 +780,27 @@ struct ItemRowView: View {
             Spacer()
             
             // Actions
-            if item.status == .reviewing {
-                Button("Review") {
-                    onReview()
+            HStack(spacing: 8) {
+                // QuickLook button (always available when not actively processing)
+                if !item.status.isActive {
+                    QuickLookButton(url: item.url)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .tint(.orange)
-            } else if case .failed(let reason) = item.status {
-                Image(systemName: "info.circle")
-                    .foregroundStyle(.red)
-                    .help(reason)
-            } else if item.status == .completed {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                
+                if item.status == .reviewing {
+                    Button("Review") {
+                        onReview()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .tint(.orange)
+                } else if case .failed(let reason) = item.status {
+                    Image(systemName: "info.circle")
+                        .foregroundStyle(.red)
+                        .help(reason)
+                } else if item.status == .completed {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
             }
         }
         .padding(.vertical, 8)
@@ -607,6 +817,83 @@ struct ItemRowView: View {
                                NSEvent.modifierFlags.contains(.command))
             }
         }
+    }
+    
+    private func confidenceColor(_ confidence: Double) -> Color {
+        if confidence >= 0.85 { return .green }
+        if confidence >= 0.6 { return .yellow }
+        return .orange
+    }
+}
+
+// MARK: - Batch Review Item Row
+
+struct BatchReviewItemRow: View {
+    let item: ProcessingItem
+    let onReview: () -> Void
+    let onAccept: () -> Void
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // Clickable file icon for QuickLook
+            QuickLookIcon(url: item.url, size: 36)
+            
+            // File info
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.fileName)
+                    .font(.headline)
+                    .lineLimit(1)
+                
+                if !item.fullCategoryPath.components.isEmpty {
+                    CondensedCategoryPathView(
+                        path: item.fullCategoryPath,
+                        maxVisibleComponents: 2,
+                        compact: true
+                    )
+                }
+                
+                // Confidence and rationale
+                HStack(spacing: 8) {
+                    let confidence = item.displayConfidence
+                    Text("\(Int(confidence * 100))%")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(confidenceColor(confidence))
+                    
+                    if let rationale = item.feedbackItem?.rationale, !rationale.isEmpty {
+                        Text(rationale)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            
+            Spacer()
+            
+            // Action buttons
+            HStack(spacing: 8) {
+                // QuickLook button
+                QuickLookButton(url: item.url)
+                
+                Button("Review") {
+                    onReview()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                
+                Button {
+                    onAccept()
+                } label: {
+                    Image(systemName: "checkmark.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(.green)
+                .help("Accept this categorization")
+            }
+        }
+        .padding(.vertical, 6)
     }
     
     private func confidenceColor(_ confidence: Double) -> Color {

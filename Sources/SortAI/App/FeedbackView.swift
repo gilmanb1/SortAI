@@ -369,6 +369,11 @@ struct BatchReviewView: View {
         items.filter { $0.needsReview }
     }
     
+    /// URLs for QuickLook - all pending items for cycling
+    private var quickLookURLs: [URL] {
+        pendingItems.map { URL(fileURLWithPath: $0.filePath) }
+    }
+    
     var body: some View {
         NavigationSplitView {
             // List of items
@@ -387,6 +392,8 @@ struct BatchReviewView: View {
             }
             .listStyle(.sidebar)
             .frame(minWidth: 300)
+            // Enable Space key to toggle QuickLook for the current item, with cycling through all
+            .quickLookPreview(urls: quickLookURLs, currentIndex: selectedIndex)
         } detail: {
             if pendingItems.isEmpty {
                 VStack(spacing: 16) {
@@ -494,18 +501,23 @@ struct ReviewItemRow: View {
     let item: FeedbackDisplayItem
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(item.fileName)
-                .font(.headline)
-                .lineLimit(1)
+        HStack(spacing: 10) {
+            // Clickable file icon for QuickLook preview
+            QuickLookIcon(url: URL(fileURLWithPath: item.filePath), size: 32)
             
-            CondensedCategoryPathView(
-                path: item.categoryPath,
-                maxVisibleComponents: 2,
-                compact: true
-            )
-            
-            ConfidenceBadge(confidence: item.confidence)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.fileName)
+                    .font(.headline)
+                    .lineLimit(1)
+                
+                CondensedCategoryPathView(
+                    path: item.categoryPath,
+                    maxVisibleComponents: 2,
+                    compact: true
+                )
+                
+                ConfidenceBadge(confidence: item.confidence)
+            }
         }
         .padding(.vertical, 4)
     }
@@ -524,24 +536,32 @@ struct ReviewDetailView: View {
     @State private var showCategoryBrowser = false
     @State private var isTextFieldFocused: Bool = false
     
+    private var fileURL: URL {
+        URL(fileURLWithPath: item.filePath)
+    }
+    
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                // File info header
+                // File info header with QuickLook preview
                 VStack(spacing: 8) {
-                    Image(systemName: item.fileIcon)
-                        .font(.system(size: 48))
-                        .foregroundStyle(.blue)
+                    // Clickable file icon for QuickLook
+                    QuickLookIcon(url: fileURL, size: 64)
                     
                     Text(item.fileName)
                         .font(.title2)
                         .fontWeight(.semibold)
                     
-                    Text(item.filePath)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    HStack(spacing: 8) {
+                        Text(item.filePath)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        
+                        // QuickLook button
+                        QuickLookButton(url: fileURL)
+                    }
                 }
                 
                 Divider()

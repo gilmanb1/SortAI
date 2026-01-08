@@ -152,6 +152,18 @@ final class EntityRepository: Sendable {
         }
     }
     
+    /// Deletes all entities (all types)
+    func deleteAll() throws -> Int {
+        try database.write { db in
+            try Entity.deleteAll(db)
+        }
+    }
+    
+    /// Counts all entities
+    func countAll() throws -> Int {
+        try count(type: nil)
+    }
+    
     // MARK: - Category Operations
     
     /// Gets or creates a category path, creating all ancestors
