@@ -32,12 +32,12 @@ SortAI is an intelligent macOS application that uses Large Language Models (LLMs
 ### 🗂️ Dynamic Taxonomy
 - **Emergent Categories**: AI generates category hierarchy based on your files
 - **User Verification**: Edit, rename, merge, or split categories before organizing
-- **Persistent Learning**: Export/import learned patterns
+- **Persistent Learning**: Knowledge graph stores corrections (export/import UI planned)
 
 ### 🎨 Modern macOS UI
 - **Wizard Flow**: First-time user experience guides setup
 - **Tree View Editor**: Visual hierarchy management
-- **QuickLook Integration**: Preview files without leaving the app
+- **QuickLook Integration**: Component ready (UI integration planned)
 - **Conflict Resolution**: Handle file conflicts elegantly
 
 ### 🔧 Robust Media Processing
@@ -386,9 +386,12 @@ When you correct a categorization:
 2. Pattern embeddings are updated
 3. Future similar files will use the learned pattern
 
-### Exporting Learned Patterns
+### Exporting Learned Patterns (API Only)
+
+> **Note**: Export/import is implemented at the API level but not yet exposed in the UI. A future update will add menu options to export and import your learned patterns.
 
 ```swift
+// Programmatic export (no UI yet)
 let exporter = GraphRAGExporter()
 try await exporter.export(to: URL(fileURLWithPath: "~/patterns.sortai.json.gz"))
 ```
@@ -512,6 +515,9 @@ rm -rf ~/Library/Application\ Support/SortAI/sortai.db
 
 ### Short-Term (v1.2)
 
+- [ ] **Wire up Watch Mode**: Connect Settings toggle to `ContinuousWatchManager`
+- [ ] **Export/Import UI**: Add File menu options to backup/restore learned patterns
+- [ ] **QuickLook integration**: Add preview panel to feedback review workflow
 - [ ] **Apple Foundation Models support** (macOS 26+): Zero-dependency LLM option
 - [ ] **Progressive degradation cascade**: Apple LLM → Ollama → Local ML → Error
 - [ ] **Improved local-only mode**: Better categorization without LLM using combined ML signals
@@ -521,7 +527,7 @@ rm -rf ~/Library/Application\ Support/SortAI/sortai.db
 ### Medium-Term (v1.3)
 
 - [ ] **Cloud backup**: Sync learned patterns across devices
-- [ ] **Watch folders**: Automatically organize new files in monitored directories
+- [ ] **Watch folders**: Backend implemented (`ContinuousWatchManager`), needs UI wiring
 - [ ] **Custom rules**: User-defined regex → category mappings
 - [ ] **Duplicate detection**: Identify and handle duplicate files
 - [ ] **Smart suggestions**: Proactively suggest organization improvements
@@ -561,6 +567,11 @@ See [LLM_Research.md](LLM_Research.md) for detailed analysis of:
 - 🔄 Batch editing UI
 - 🔄 Performance with >1000 files
 - 🔄 Error recovery and retry logic
+
+### Implemented But Not Wired to UI
+- ⚙️ **Watch Mode**: `ContinuousWatchManager` ready, Settings toggle exists but does nothing
+- ⚙️ **Export/Import Knowledge**: `GraphRAGExporter` has methods, no menu/UI access
+- ⚙️ **QuickLook Panel**: Component built, not integrated into main workflow
 
 ## License
 
