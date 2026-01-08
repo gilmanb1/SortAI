@@ -284,6 +284,10 @@ actor SortAIPipeline: FileProcessing {
             try? concreteMemory.saveRecord(record)
         }
         
+        // Save pattern for high-confidence auto-accepted results
+        // This enables instant recognition by checksum on future encounters
+        await saveAutoAcceptedPattern(signature: signature, brainResult: brainResult)
+        
         processedCount += 1
         return result
     }
@@ -555,6 +559,10 @@ actor SortAIPipeline: FileProcessing {
             try? concreteMemory.saveRecord(record)
         }
         
+        // Save pattern for high-confidence auto-accepted results
+        // This enables instant recognition by checksum on future encounters
+        await saveAutoAcceptedPattern(signature: signature, brainResult: brainResult)
+        
         processedCount += 1
         await onProgress?(url, .completed(result))
         return result
@@ -604,6 +612,40 @@ actor SortAIPipeline: FileProcessing {
         // Update brain's recent categories (only if concrete Brain available)
         if let concreteBrain = concreteBrain {
             await concreteBrain.addRecentCategory(correctedPath)
+        }
+    }
+    
+    /// Saves a pattern for an auto-accepted high-confidence result
+    /// This enables future instant recognition by checksum lookup
+    private func saveAutoAcceptedPattern(signature: FileSignature, brainResult: BrainResult) async {
+        // Only save patterns for high confidence results (>= 0.85)
+        // Uses memorySimilarityThreshold as the bar for "trustworthy enough to remember"
+        guard brainResult.confidence >= config.memorySimilarityThreshold else { return }
+        
+        do {
+            // Generate embedding for this file
+            let embedding = try await embeddingGenerator.generateEmbedding(for: signature)
+            let label = brainResult.fullCategoryPath.description
+            
+            // Save to memory store - this enables checksum-based instant lookup
+            try memoryStore.savePattern(
+                signature: signature,
+                embedding: embedding,
+                label: label,
+                originalLabel: nil,
+                confidence: brainResult.confidence
+            )
+            
+            NSLog("💾 [Pipeline] Saved auto-accepted pattern: %@ -> %@ (checksum: %@)",
+                  signature.title, label, String(signature.checksum.prefix(8)))
+            
+            // Also update brain's recent categories for better suggestions
+            if let concreteBrain = concreteBrain {
+                await concreteBrain.addRecentCategory(brainResult.fullCategoryPath)
+            }
+        } catch {
+            // Non-fatal - pattern saving is optional for auto-accepted files
+            NSLog("⚠️ [Pipeline] Failed to save auto-accepted pattern: %@", error.localizedDescription)
         }
     }
     
