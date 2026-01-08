@@ -397,26 +397,42 @@ final class AppState {
             do {
                 item.status = .organizing
                 
-                // If corrected, update the brain result and learn
+                // If corrected, update both the brain result AND feedbackItem
                 if let newPath = correctedPath {
                     try await pipeline?.learnFromResult(result, correctedPath: newPath)
                     
-                    // Update result with correction
+                    // Get subcategories from the new path (everything after root)
+                    let subcategories = Array(newPath.components.dropFirst())
+                    
+                    // Update result with correction (including all subcategories)
                     let updatedBrainResult = BrainResult(
                         category: newPath.root,
-                        subcategory: newPath.components.dropFirst().first,
+                        subcategory: subcategories.first,
                         confidence: 1.0,
                         rationale: "Manually corrected",
-                        tags: result.brainResult.tags
+                        suggestedPath: nil,
+                        tags: result.brainResult.tags,
+                        allSubcategories: subcategories
                     )
                     item.result = ProcessingResult(
                         signature: result.signature,
                         brainResult: updatedBrainResult,
                         wasFromMemory: false
                     )
+                    
+                    // CRITICAL: Also update the feedbackItem so UI reflects the change
+                    if var feedbackItem = item.feedbackItem {
+                        feedbackItem.categoryPath = newPath
+                        feedbackItem.status = .humanCorrected
+                        item.feedbackItem = feedbackItem
+                        NSLog("✅ [AppState] Updated feedbackItem category to: %@", newPath.description)
+                    }
                 } else if item.feedbackItem != nil {
-                    // Just accept - feedback item exists but no correction needed
-                    // Future: try await pipeline?.learnFromFeedback(...)
+                    // Just accept - update status but keep category
+                    if var feedbackItem = item.feedbackItem {
+                        feedbackItem.status = .humanAccepted
+                        item.feedbackItem = feedbackItem
+                    }
                 }
                 
                 item.status = .accepted
