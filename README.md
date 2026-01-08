@@ -77,8 +77,8 @@ SortAI is an intelligent macOS application that uses Large Language Models (LLMs
 
 ```bash
 # Clone the repository
-git clone https://github.com/brimax/osx_cleanup_llm.git
-cd osx_cleanup_llm
+git clone https://github.com/gilmanb1/SortAI.git
+cd SortAI
 
 # First time: Set up custom SQLite (required for GRDB snapshots)
 ./setup_sqlite.sh
