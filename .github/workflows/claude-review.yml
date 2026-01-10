@@ -1,0 +1,106 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    name: AI Code Review
+    runs-on: ubuntu-latest
+    # Only run on PRs, or on issue comments that are on PRs and mention @claude
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' && 
+       github.event.issue.pull_request && 
+       contains(github.event.comment.body, '@claude'))
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Claude Code Review
+        uses: anthropics/claude-code-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-sonnet-4-20250514
+          direct_prompt: |
+            You are reviewing a pull request for SortAI, a Swift/macOS application for AI-powered file organization.
+            
+            ## Project Context
+            
+            SortAI is a macOS 15+ app using:
+            - **Swift 6** with strict concurrency
+            - **GRDB** with custom SQLite (SQLITE_ENABLE_SNAPSHOT=1 required)
+            - **SwiftUI** for the interface
+            - **Multiple LLM providers**: Ollama, OpenAI, Apple Intelligence
+            - **Custom SQLite**: Built from source in `.local/sqlite/install/`
+            
+            ## Review Focus Areas
+            
+            ### 1. Swift 6 & Concurrency
+            - Sendable conformance for types crossing actor boundaries
+            - Proper actor isolation (@MainActor for UI, custom actors for data)
+            - async/await patterns without data races
+            - No use of deprecated concurrency patterns
+            
+            ### 2. Memory Safety
+            - Watch for retain cycles in closures (use [weak self])
+            - Proper cleanup in deinit where needed
+            - Actor boundary crossings don't leak mutable state
+            
+            ### 3. Custom SQLite Compatibility  
+            - No imports of system SQLite
+            - Build flags maintained in Package.swift
+            - GRDB snapshot functions used correctly
+            
+            ### 4. Architecture Patterns
+            - Protocol-oriented design for providers (LLMProvider, EmbeddingProvider)
+            - Graceful degradation when services unavailable
+            - Consistent error handling (custom error types, try/catch)
+            
+            ### 5. LLM Provider Layer
+            - Provider protocol compliance
+            - Streaming support where applicable
+            - Proper response parsing and error mapping
+            
+            ### 6. Test Coverage
+            - New public APIs have tests
+            - Async test patterns (expectations, async test methods)
+            - Edge cases and error conditions covered
+            
+            ## Response Format
+            
+            For each issue found:
+            1. **Location**: File and line number
+            2. **Severity**: 🔴 Critical | 🟡 Warning | 🔵 Suggestion
+            3. **Issue**: Clear description
+            4. **Fix**: Specific code suggestion
+            
+            If the code looks good, say so concisely. Don't nitpick style unless it impacts readability or correctness.
+            
+            At the end, provide:
+            - ✅ **Approve** if ready to merge
+            - 🔄 **Request Changes** if issues need fixing
+            - 💬 **Comment** if just suggestions
+
+          # Include Swift files, exclude build artifacts and prototypes
+          include_files: |
+            Sources/**/*.swift
+            Tests/**/*.swift
+            Package.swift
+          exclude_files: |
+            .build/**
+            build/**
+            Prototypes/**
+            DerivedData/**
+

@@ -89,3 +89,81 @@ The custom build in `.local/sqlite/install/` has `SQLITE_ENABLE_SNAPSHOT=1` enab
 - `Package.swift` - Swift package definition
 - `build.sh` - Build script with custom SQLite flags
 
+---
+
+## Git Workflow & AI Development
+
+See `GitWorkflow.md` for the complete workflow documentation.
+
+### Quick Commands
+```bash
+/new-feature <name>    # Start feature branch
+/new-bugfix <name>     # Start bugfix branch
+/new-proto <name>      # Start prototype branch
+/pr-ready              # Check if ready for PR
+/create-pr             # Create pull request
+/sync-main             # Rebase on main
+/ship-it               # Merge and cleanup
+/run-tests [filter]    # Run tests
+```
+
+### Ralph Loop for Complex Tasks
+```bash
+/ralph-loop "task description" --max-iterations 20 --completion-promise "DONE"
+/cancel-ralph          # Cancel active loop
+```
+
+### CI/CD
+- GitHub Actions runs on all PRs (`.github/workflows/ci.yml`)
+- Claude reviews all PRs (`.github/workflows/claude-review.yml`)
+- Requires `ANTHROPIC_API_KEY` secret in repository settings
+
+---
+
+## Workflow Issues & Resolutions
+
+*Document issues encountered during development and their solutions here for continuous improvement.*
+
+### Template
+
+```markdown
+## Issue: [Brief Title]
+
+**Date**: YYYY-MM-DD
+**Branch**: feature/xxx
+
+**Problem**: 
+[What went wrong]
+
+**Root Cause**:
+[Why it happened]
+
+**Solution**:
+[How it was fixed]
+
+**Prevention**:
+[Changes to prevent recurrence]
+```
+
+---
+
+## Known Gotchas
+
+### 1. SQLite Library Not Found at Runtime
+**Symptom**: `dyld: Library not loaded: @rpath/libsqlite3.dylib`
+
+**Fix**: 
+```bash
+cp .local/sqlite/install/libsqlite3.dylib .build/arm64-apple-macosx/debug/
+```
+
+### 2. Tests Fail with Snapshot Symbol Errors
+**Symptom**: `Symbol not found: _sqlite3_snapshot_cmp`
+
+**Fix**: Ensure using custom SQLite, not system SQLite. Check linker flags in test command.
+
+### 3. GitHub Actions SQLite Cache Miss
+**Symptom**: CI builds SQLite every time
+
+**Fix**: Check cache key matches architecture. The CI workflow caches by `runner.os` and `runner.arch`.
+

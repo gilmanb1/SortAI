@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: macos-14  # Apple Silicon runner
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '6.0'
+      
+      - name: Cache SQLite Build
+        id: cache-sqlite
+        uses: actions/cache@v4
+        with:
+          path: .local/sqlite/install
+          key: sqlite-snapshot-3470200-${{ runner.os }}-${{ runner.arch }}
+          restore-keys: |
+            sqlite-snapshot-3470200-${{ runner.os }}-
+      
+      - name: Build Custom SQLite (if not cached)
+        if: steps.cache-sqlite.outputs.cache-hit != 'true'
+        run: |
+          echo "Building custom SQLite with SQLITE_ENABLE_SNAPSHOT..."
+          mkdir -p .local/sqlite
+          cd .local/sqlite
+          
+          # Download SQLite amalgamation
+          curl -sLO https://www.sqlite.org/2024/sqlite-amalgamation-3470200.zip
+          unzip -q sqlite-amalgamation-3470200.zip
+          cd sqlite-amalgamation-3470200
+          
+          # Create build script
+          cat > build_sqlite.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          INSTALL_DIR="$(dirname "$0")/../install"
+          mkdir -p "$INSTALL_DIR"
+          
+          clang -dynamiclib -o "$INSTALL_DIR/libsqlite3.dylib" sqlite3.c \
+            -DSQLITE_ENABLE_SNAPSHOT=1 \
+            -DSQLITE_ENABLE_COLUMN_METADATA=1 \
+            -DSQLITE_ENABLE_FTS5=1 \
+            -DSQLITE_ENABLE_JSON1=1 \
+            -DSQLITE_ENABLE_RTREE=1 \
+            -DSQLITE_THREADSAFE=1 \
+            -lpthread \
+            -install_name @rpath/libsqlite3.dylib
+          
+          cp sqlite3.h "$INSTALL_DIR/"
+          cp sqlite3ext.h "$INSTALL_DIR/"
+          echo "Built custom SQLite to $INSTALL_DIR"
+          EOF
+          
+          chmod +x build_sqlite.sh
+          ./build_sqlite.sh
+      
+      - name: Verify SQLite Build
+        run: |
+          echo "Checking SQLite library..."
+          ls -la .local/sqlite/install/
+          nm .local/sqlite/install/libsqlite3.dylib | grep -i snapshot | head -5 || echo "Snapshot symbols check"
+      
+      - name: Build SortAI
+        run: |
+          swift build \
+            -Xcc -I$(pwd)/.local/sqlite/install \
+            -Xlinker -L$(pwd)/.local/sqlite/install \
+            -Xlinker -rpath \
+            -Xlinker $(pwd)/.local/sqlite/install
+      
+      - name: Prepare Test Environment
+        run: |
+          mkdir -p .build/arm64-apple-macosx/debug
+          cp .local/sqlite/install/libsqlite3.dylib .build/arm64-apple-macosx/debug/
+      
+      - name: Run Tests
+        run: |
+          swift test \
+            -Xcc -I$(pwd)/.local/sqlite/install \
+            -Xlinker -L$(pwd)/.local/sqlite/install \
+            2>&1 | tee test-output.log
+      
+      - name: Upload Test Results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output
+          path: test-output.log
+          retention-days: 7
+
+  lint:
+    name: SwiftLint
+    runs-on: macos-14
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Install SwiftLint
+        run: brew install swiftlint || true
+      
+      - name: Run SwiftLint
+        run: |
+          swiftlint lint \
+            --reporter github-actions-logging \
+            --config .swiftlint.yml 2>/dev/null || \
+          swiftlint lint --reporter github-actions-logging || true
+        continue-on-error: true
+
