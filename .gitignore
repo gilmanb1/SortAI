@@ -85,6 +85,12 @@ Session.vim
 # Specstory (AI conversation history)
 .specstory/
 
+# Sugar AI (local development state)
+.sugar/
+
+# Local logs
+logs/
+
 # -----------------------------------------------------------------------------
 # Application Data & Caches
 # -----------------------------------------------------------------------------

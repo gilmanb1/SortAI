@@ -1290,23 +1290,185 @@ actor MediaInspector: MediaInspecting {
     }
     
     private func extractWordDocument(from url: URL) throws -> String {
-        // .docx files are ZIP archives; extract document.xml
-        // For simplicity, try reading as plain text or use system frameworks
-        if let text = try? String(contentsOf: url, encoding: .utf8) {
+        let filename = url.lastPathComponent
+        let ext = url.pathExtension.lowercased()
+        var extractedText: String? = nil
+        var lastError: String? = nil
+        
+        NSLog("📄 [MediaInspector] Attempting Word document extraction: \(filename)")
+        
+        // Strategy 1: For .docx files, extract from ZIP archive (Office Open XML)
+        if ext == "docx" {
+            if let text = extractDocxFromZip(url: url) {
+                NSLog("✅ [MediaInspector] Successfully extracted .docx via ZIP: \(text.count) chars")
+                return text
+            }
+            lastError = "ZIP extraction failed"
+        }
+        
+        // Strategy 2: Try NSAttributedString with Office Open XML type (for .docx)
+        if extractedText == nil {
+            do {
+                let data = try Data(contentsOf: url)
+                let attributedString = try NSAttributedString(
+                    data: data,
+                    options: [.documentType: NSAttributedString.DocumentType.officeOpenXML],
+                    documentAttributes: nil
+                )
+                if !attributedString.string.isEmpty {
+                    extractedText = attributedString.string
+                    NSLog("✅ [MediaInspector] Successfully extracted via NSAttributedString (OOXML): \(extractedText!.count) chars")
+                }
+            } catch {
+                lastError = "NSAttributedString OOXML: \(error.localizedDescription)"
+            }
+        }
+        
+        // Strategy 3: Try NSAttributedString with legacy .doc format
+        if extractedText == nil {
+            do {
+                let data = try Data(contentsOf: url)
+                let attributedString = try NSAttributedString(
+                    data: data,
+                    options: [.documentType: NSAttributedString.DocumentType.docFormat],
+                    documentAttributes: nil
+                )
+                if !attributedString.string.isEmpty {
+                    extractedText = attributedString.string
+                    NSLog("✅ [MediaInspector] Successfully extracted via NSAttributedString (DOC): \(extractedText!.count) chars")
+                }
+            } catch {
+                lastError = "NSAttributedString DOC: \(error.localizedDescription)"
+            }
+        }
+        
+        // Strategy 4: Try reading as plain text (some .doc files are actually plain text)
+        if extractedText == nil {
+            if let text = try? String(contentsOf: url, encoding: .utf8), !text.isEmpty {
+                // Check if it looks like actual text content (not binary garbage)
+                let printableRatio = Double(text.unicodeScalars.filter { $0.isASCII && $0.value >= 32 }.count) / Double(text.count)
+                if printableRatio > 0.8 {
+                    extractedText = text
+                    NSLog("✅ [MediaInspector] Successfully read as plain text: \(text.count) chars")
+                }
+            }
+        }
+        
+        // Strategy 5: Try textutil command (macOS built-in converter)
+        if extractedText == nil {
+            if let text = extractViaTextutil(url: url) {
+                extractedText = text
+                NSLog("✅ [MediaInspector] Successfully extracted via textutil: \(text.count) chars")
+            }
+        }
+        
+        // If we got text, return it
+        if let text = extractedText, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return text
         }
         
-        // Attempt to use NSAttributedString for .doc files
-        let data = try Data(contentsOf: url)
-        if let attributedString = try? NSAttributedString(
-            data: data,
-            options: [.documentType: NSAttributedString.DocumentType.docFormat],
-            documentAttributes: nil
-        ) {
-            return attributedString.string
+        // Graceful degradation: Return filename-based metadata instead of throwing
+        // This allows categorization to proceed using filename cues
+        NSLog("⚠️ [MediaInspector] All Word extraction methods failed for: \(filename). Using filename fallback. Last error: \(lastError ?? "unknown")")
+        
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attributes?[.size] as? Int64) ?? 0
+        let modDate = (attributes?[.modificationDate] as? Date)?.ISO8601Format() ?? "unknown"
+        
+        return """
+        [Word Document - Content Extraction Unavailable]
+        Filename: \(filename)
+        Size: \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+        Modified: \(modDate)
+        Note: Document content could not be extracted. Categorization based on filename only.
+        """
+    }
+    
+    /// Extract text content from .docx file by unzipping and parsing document.xml
+    private func extractDocxFromZip(url: URL) -> String? {
+        let fileManager = FileManager.default
+        let tempDir = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        
+        defer {
+            try? fileManager.removeItem(at: tempDir)
         }
         
-        throw InspectorError.extractionFailed("Cannot extract text from Word document")
+        // Use unzip command to extract
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        process.arguments = ["-q", "-o", url.path, "-d", tempDir.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            
+            guard process.terminationStatus == 0 else {
+                return nil
+            }
+        } catch {
+            return nil
+        }
+        
+        var extractedText: [String] = []
+        
+        // Read document.xml (main content)
+        let documentPath = tempDir.appendingPathComponent("word/document.xml")
+        if let documentData = try? Data(contentsOf: documentPath),
+           let documentContent = String(data: documentData, encoding: .utf8) {
+            // Extract text from <w:t> tags (Word text elements)
+            let pattern = "<w:t[^>]*>([^<]*)</w:t>"
+            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                let range = NSRange(documentContent.startIndex..., in: documentContent)
+                let matches = regex.matches(in: documentContent, options: [], range: range)
+                for match in matches {
+                    if let textRange = Range(match.range(at: 1), in: documentContent) {
+                        let text = String(documentContent[textRange])
+                        if !text.isEmpty {
+                            extractedText.append(text)
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If we found text, join it with spaces
+        let result = extractedText.joined(separator: " ")
+            .replacingOccurrences(of: "  +", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        return result.isEmpty ? nil : String(result.prefix(maxTextLength))
+    }
+    
+    /// Extract text using macOS textutil command
+    private func extractViaTextutil(url: URL) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/textutil")
+        process.arguments = ["-stdout", "-convert", "txt", url.path]
+        
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            
+            guard process.terminationStatus == 0 else {
+                return nil
+            }
+            
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let text = String(data: data, encoding: .utf8),
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return String(text.prefix(maxTextLength))
+            }
+        } catch {
+            return nil
+        }
+        
+        return nil
     }
     
     /// Extract text from Excel files (.xlsx, .xls, .csv, .numbers)

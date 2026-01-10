@@ -483,27 +483,40 @@ actor SortAIPipeline: FileProcessing {
     }
     
     /// Process a single batch of files concurrently
+    /// Uses non-throwing task group to ensure one file failure doesn't stop others
     private func processBatch(
         urls: [URL],
         onProgress: ProgressCallback?
     ) async throws -> [ProcessingResult] {
         
-        return try await withThrowingTaskGroup(of: (Int, ProcessingResult).self) { group in
+        // Use regular TaskGroup (non-throwing) to ensure failures don't cancel other tasks
+        return await withTaskGroup(of: (Int, ProcessingResult?).self) { group in
             var results = [ProcessingResult?](repeating: nil, count: urls.count)
             
             // Start all tasks in this batch
             for (index, url) in urls.enumerated() {
                 group.addTask {
-                    let result = try await self.processWithProgress(
-                        url: url,
-                        onProgress: onProgress
-                    )
-                    return (index, result)
+                    do {
+                        let result = try await self.processWithProgress(
+                            url: url,
+                            onProgress: onProgress
+                        )
+                        return (index, result)
+                    } catch {
+                        // Log the error but don't stop other tasks
+                        NSLog("⚠️ [Pipeline] File processing failed: \(url.lastPathComponent) - \(error.localizedDescription)")
+                        
+                        // Report failure via progress callback (already done in processWithProgress,
+                        // but ensure it's called even for unexpected errors)
+                        await onProgress?(url, .failed(error.localizedDescription))
+                        
+                        return (index, nil)
+                    }
                 }
             }
             
-            // Wait for ALL tasks in batch to complete
-            for try await (index, result) in group {
+            // Wait for ALL tasks in batch to complete (failures included)
+            for await (index, result) in group {
                 results[index] = result
             }
             
