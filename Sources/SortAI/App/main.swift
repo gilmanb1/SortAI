@@ -234,6 +234,42 @@ struct CommandLineHandler {
 
 // MARK: - Main Entry Point
 
+/// Initialize file logging before app launch (dev mode only)
+@MainActor
+func initializeEarlyLogging() {
+    guard FileLogger.isDevMode else { return }
+    
+    // Load configuration
+    SortAIDefaults.registerDefaults()
+    let config = ConfigurationManager.shared.config.logging.asLogConfiguration
+    
+    Task {
+        await FileLogger.shared.updateConfiguration(config)
+        do {
+            try await FileLogger.shared.initialize()
+            await StderrCapture.shared.startCapture()
+            
+            let paths = await FileLogger.shared.getLogPaths()
+            if let logPath = paths.log {
+                print("📝 File logging active: \(logPath.path)")
+            }
+        } catch {
+            print("⚠️ Failed to initialize file logging: \(error.localizedDescription)")
+        }
+    }
+}
+
+/// Shutdown file logging on app termination
+@MainActor
+func shutdownLogging() {
+    guard FileLogger.isDevMode else { return }
+    
+    Task {
+        await StderrCapture.shared.stopCapture()
+        await FileLogger.shared.close()
+    }
+}
+
 @MainActor
 func runApp() {
     let handler = CommandLineHandler(args: CommandLine.arguments)
@@ -243,6 +279,9 @@ func runApp() {
         handler.printHelp()
         exit(0)
     }
+    
+    // Initialize file logging early
+    initializeEarlyLogging()
     
     // Handle cache clearing
     if handler.shouldClearCache {
@@ -264,6 +303,7 @@ func runApp() {
         let success = handler.clearCache(type: cacheType, dryRun: handler.isDryRun)
         
         if handler.shouldExit {
+            shutdownLogging()
             exit(success ? 0 : 1)
         } else {
             // Continue to launch GUI

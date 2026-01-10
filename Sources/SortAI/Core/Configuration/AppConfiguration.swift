@@ -412,6 +412,48 @@ struct ProcessingConfiguration: Codable, Sendable, Equatable {
     )
 }
 
+/// Logging configuration for dev mode file logging
+struct LoggingConfiguration: Codable, Sendable, Equatable {
+    /// Directory where log files are stored
+    var logDirectory: String
+    
+    /// Maximum age of log files in days before cleanup
+    var maxAgeDays: Int
+    
+    /// Maximum total size of logs in bytes before cleanup
+    var maxTotalSizeBytes: Int64
+    
+    /// Whether to also print to console (stdout/stderr)
+    var printToConsole: Bool
+    
+    /// Whether file logging is enabled
+    var enabled: Bool
+    
+    private static var defaultLogDirectory: String {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return appSupport.appendingPathComponent("SortAI/logs").path
+    }
+    
+    static let `default` = LoggingConfiguration(
+        logDirectory: defaultLogDirectory,
+        maxAgeDays: 30,
+        maxTotalSizeBytes: 1_073_741_824, // 1GB
+        printToConsole: ProcessInfo.processInfo.environment["SORTAI_LOG_CONSOLE"] == "1",
+        enabled: true
+    )
+    
+    /// Convert to FileLogger's LogConfiguration
+    var asLogConfiguration: LogConfiguration {
+        LogConfiguration(
+            logDirectory: logDirectory,
+            maxAgeDays: maxAgeDays,
+            maxTotalSizeBytes: maxTotalSizeBytes,
+            printToConsole: printToConsole,
+            enabled: enabled
+        )
+    }
+}
+
 /// AI Provider configuration (Apple Intelligence, Ollama, Cloud)
 struct AIProviderConfiguration: Codable, Sendable, Equatable {
     /// User preference for LLM provider selection
@@ -545,6 +587,9 @@ struct AppConfiguration: Codable, Sendable, Equatable {
     /// Processing settings
     var processing: ProcessingConfiguration
     
+    /// Logging settings (dev mode file logging)
+    var logging: LoggingConfiguration
+    
     /// Application-level settings
     var lastOutputFolder: String?
     
@@ -565,6 +610,7 @@ struct AppConfiguration: Codable, Sendable, Equatable {
         persistence: PersistenceConfiguration.default,
         organization: OrganizationConfiguration.default,
         processing: ProcessingConfiguration.default,
+        logging: LoggingConfiguration.default,
         lastOutputFolder: nil
     )
     
@@ -580,6 +626,7 @@ struct AppConfiguration: Codable, Sendable, Equatable {
         persistence: PersistenceConfiguration.testing,
         organization: OrganizationConfiguration.default,
         processing: ProcessingConfiguration.default,
+        logging: LoggingConfiguration.default,
         lastOutputFolder: nil
     )
     

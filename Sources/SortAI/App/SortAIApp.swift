@@ -12,11 +12,12 @@ struct SortAIApp: App {
     
     init() {
         // Register defaults FIRST before any @AppStorage or ConfigurationManager access
+        // (also registered in main.swift but safe to call twice)
         SortAIDefaults.registerDefaults()
         
         logger.info("🚀 SortAI App initializing... PID: \(ProcessInfo.processInfo.processIdentifier)")
-        NSLog("🚀 [DEBUG] SortAI App initializing... PID: %d", ProcessInfo.processInfo.processIdentifier)
-        NSLog("🚀 [DEBUG] Default model: %@", SortAIDefaults.defaultModel)
+        SortAILog("🚀 SortAI App initializing... PID: \(ProcessInfo.processInfo.processIdentifier)")
+        SortAILog("🚀 Default model: \(SortAIDefaults.defaultModel)")
     }
     
     var body: some Scene {
@@ -26,7 +27,7 @@ struct SortAIApp: App {
                 .frame(minWidth: 400, minHeight: 500)
                 .onAppear {
                     logger.info("🚀 ContentView appeared")
-                    NSLog("🚀 [DEBUG] ContentView appeared")
+                    SortAILog("🚀 ContentView appeared")
                 }
         }
         .windowStyle(.hiddenTitleBar)
