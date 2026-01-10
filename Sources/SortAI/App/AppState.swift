@@ -118,55 +118,58 @@ final class AppState {
         NSLog("🎬 [DEBUG] FFmpeg: %@", ffmpegStatus.statusDescription)
         
         do {
-            var appConfig = configManager.config
-            NSLog("🔧 [DEBUG] Config loaded - Ollama host: %@", appConfig.ollama.host)
+            let appConfig = configManager.config
+            NSLog("🔧 [DEBUG] Config loaded")
+            NSLog("📱 [DEBUG] Provider preference: %@", appConfig.aiProvider.preference.rawValue)
             
-            // Configure the model manager with the correct host
+            // Configure Ollama model manager (for Ollama fallback)
             await OllamaModelManager.shared.setHost(appConfig.ollama.host)
             
-            // Ensure required models are available (or download them)
-            let resolvedModel = try await ensureModelsAvailable(appConfig: appConfig)
+            // v2.0: UnifiedCategorizationService handles provider availability internally
+            // No need to pre-check Ollama - the cascade will handle unavailability gracefully
             
-            // Update config with the resolved model if different
-            if resolvedModel != appConfig.ollama.documentModel {
-                NSLog("🔄 [DEBUG] Updating config to use resolved model: %@", resolvedModel)
-                configManager.updateOllama { ollama in
-                    ollama.documentModel = resolvedModel
-                    ollama.videoModel = resolvedModel
-                    ollama.imageModel = resolvedModel
-                    ollama.audioModel = resolvedModel
-                    ollama.embeddingModel = resolvedModel
-                }
-                try? configManager.save()
-                appConfig = configManager.config
-            }
-            
-            activeModel = resolvedModel
-            modelStatus = .ready
-            
-            // Register OllamaProvider with the global registry
+            // Register OllamaProvider with the global registry (for legacy compatibility)
             let ollamaProvider = OllamaProvider(
                 host: appConfig.ollama.host,
                 timeout: appConfig.ollama.timeout
             )
             await LLMProviderRegistry.shared.register(provider: ollamaProvider)
-            NSLog("🤖 [DEBUG] Registered OllamaProvider with LLMProviderRegistry")
             
+            // Create pipeline configuration with AI provider settings
             let pipelineConfig = SortAIPipelineConfiguration(
                 brainConfig: appConfig.toBrainConfiguration(),
                 embeddingDimensions: appConfig.memory.embeddingDimensions,
                 memorySimilarityThreshold: appConfig.memory.similarityThreshold,
                 useMemoryFirst: appConfig.memory.useMemoryFirst,
-                useKnowledgeGraph: appConfig.knowledgeGraph.enabled
+                useKnowledgeGraph: appConfig.knowledgeGraph.enabled,
+                // v2.0: AI Provider settings for UnifiedCategorizationService
+                providerPreference: appConfig.aiProvider.preference,
+                escalationThreshold: appConfig.aiProvider.escalationThreshold,
+                autoAcceptThreshold: appConfig.feedback.autoAcceptThreshold,
+                autoInstallOllama: appConfig.aiProvider.autoInstallOllama
             )
-            NSLog("🔧 [DEBUG] Pipeline config created, creating pipeline...")
+            
+            NSLog("🔧 [DEBUG] Creating pipeline with provider cascade...")
             pipeline = try await SortAIPipeline(configuration: pipelineConfig)
             isInitialized = true
-            NSLog("✅ [DEBUG] Pipeline initialized successfully with model: %@", resolvedModel)
-        } catch let error as OllamaModelError {
-            modelStatus = .error(error.errorDescription ?? "Unknown error")
-            lastError = error.errorDescription
-            NSLog("❌ [DEBUG] Model setup failed: %@", String(describing: error))
+            modelStatus = .ready
+            
+            // Display active provider info
+            let preferenceDesc = appConfig.aiProvider.preference == .automatic 
+                ? "Automatic (Apple Intelligence → Ollama → Local ML)"
+                : appConfig.aiProvider.preference.rawValue
+            NSLog("✅ [DEBUG] Pipeline initialized with provider preference: %@", preferenceDesc)
+            
+            // Set active model display based on preference
+            switch appConfig.aiProvider.preference {
+            case .automatic, .appleIntelligenceOnly:
+                activeModel = "Apple Intelligence"
+            case .preferOllama:
+                activeModel = appConfig.ollama.documentModel
+            case .cloud:
+                activeModel = "Cloud (OpenAI)"
+            }
+            
         } catch {
             modelStatus = .error(error.localizedDescription)
             lastError = "Failed to initialize pipeline: \(error.localizedDescription)"

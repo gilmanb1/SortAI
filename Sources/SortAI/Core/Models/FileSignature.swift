@@ -157,7 +157,7 @@ struct ProcessingResult: Identifiable, Sendable {
 }
 
 // MARK: - Brain Result
-/// The structured output from the LLM Brain
+/// The structured output from the LLM categorization
 struct BrainResult: Sendable {
     let category: String
     let subcategory: String?
@@ -169,6 +169,9 @@ struct BrainResult: Sendable {
     /// All subcategories in the path (for deep hierarchies)
     /// e.g., for "Education / Magic / Card Tricks", this would be ["Magic", "Card Tricks"]
     let allSubcategories: [String]
+    
+    /// v2.0: The provider that generated this result
+    let provider: LLMProviderIdentifier?
     
     /// The full category path as a CategoryPath object
     var fullCategoryPath: CategoryPath {
@@ -182,7 +185,8 @@ struct BrainResult: Sendable {
         rationale: String,
         suggestedPath: String? = nil,
         tags: [String] = [],
-        allSubcategories: [String]? = nil
+        allSubcategories: [String]? = nil,
+        provider: LLMProviderIdentifier? = nil
     ) {
         self.category = category
         self.subcategory = subcategory
@@ -192,12 +196,13 @@ struct BrainResult: Sendable {
         self.tags = tags
         // Use allSubcategories if provided, otherwise fall back to single subcategory
         self.allSubcategories = allSubcategories ?? (subcategory.map { [$0] } ?? [])
+        self.provider = provider
     }
 }
 
 extension BrainResult: Codable {
     enum CodingKeys: String, CodingKey {
-        case category, subcategory, confidence, rationale, suggestedPath, tags, allSubcategories
+        case category, subcategory, confidence, rationale, suggestedPath, tags, allSubcategories, provider
     }
     
     init(from decoder: Decoder) throws {
@@ -211,6 +216,7 @@ extension BrainResult: Codable {
         // Load allSubcategories or fall back to single subcategory
         allSubcategories = try container.decodeIfPresent([String].self, forKey: .allSubcategories) 
             ?? (subcategory.map { [$0] } ?? [])
+        provider = try container.decodeIfPresent(LLMProviderIdentifier.self, forKey: .provider)
     }
 }
 

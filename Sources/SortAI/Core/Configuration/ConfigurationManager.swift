@@ -208,6 +208,12 @@ final class ConfigurationManager {
         }
     }
     
+    func updateAIProvider(_ block: (inout AIProviderConfiguration) -> Void) {
+        update { config in
+            block(&config.aiProvider)
+        }
+    }
+    
     // MARK: - Change Observation
     
     /// Registers a handler to be called when configuration changes
@@ -222,6 +228,9 @@ final class ConfigurationManager {
     }
     
     // MARK: - Convenience Accessors
+    
+    /// Current AI provider configuration
+    var aiProvider: AIProviderConfiguration { config.aiProvider }
     
     /// Current Ollama configuration
     var ollama: OllamaConfiguration { config.ollama }

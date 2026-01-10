@@ -244,7 +244,7 @@ final class DefaultsIntegrationTests: XCTestCase {
         let manager = ConfigurationManager.forTesting()
         
         // Verify initial state
-        XCTAssertEqual(manager.config.ollama.documentModel, "deepseek-r1")
+        XCTAssertEqual(manager.config.ollama.documentModel, OllamaConfiguration.defaultModel)
         
         // Simulate user changing models
         manager.updateOllama { ollama in
@@ -273,7 +273,7 @@ final class DefaultsIntegrationTests: XCTestCase {
         manager.resetOllama()
         
         // Should be back to default
-        XCTAssertEqual(manager.config.ollama.documentModel, "deepseek-r1")
+        XCTAssertEqual(manager.config.ollama.documentModel, OllamaConfiguration.defaultModel)
     }
 }
 

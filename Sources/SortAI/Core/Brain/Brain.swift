@@ -1,5 +1,6 @@
 // MARK: - Brain (LLM Integration)
-// Ollama-based categorization with dynamic taxonomy and GraphRAG learning
+// Unified AI-powered categorization with Apple Intelligence, Ollama, and Cloud providers
+// Supports progressive degradation and GraphRAG learning
 
 import Foundation
 
@@ -37,9 +38,61 @@ struct EnhancedBrainResult: Sendable {
     let rationale: String
     let extractedKeywords: [String]
     let suggestedFromGraph: Bool  // True if suggested by knowledge graph
+    let provider: LLMProviderIdentifier?  // Which provider produced this result (v2.0)
+    let escalatedFrom: LLMProviderIdentifier?  // Set if result came from escalation
     
     var category: String { categoryPath.root }
     var subcategories: [String] { Array(categoryPath.components.dropFirst()) }
+    
+    /// Full category path (for UI)
+    var fullCategoryPath: CategoryPath { categoryPath }
+    
+    /// Convenience initializer without provider info (legacy)
+    init(
+        categoryPath: CategoryPath,
+        confidence: Double,
+        rationale: String,
+        extractedKeywords: [String],
+        suggestedFromGraph: Bool
+    ) {
+        self.categoryPath = categoryPath
+        self.confidence = confidence
+        self.rationale = rationale
+        self.extractedKeywords = extractedKeywords
+        self.suggestedFromGraph = suggestedFromGraph
+        self.provider = nil
+        self.escalatedFrom = nil
+    }
+    
+    /// Full initializer with provider info (v2.0)
+    init(
+        categoryPath: CategoryPath,
+        confidence: Double,
+        rationale: String,
+        extractedKeywords: [String],
+        suggestedFromGraph: Bool,
+        provider: LLMProviderIdentifier?,
+        escalatedFrom: LLMProviderIdentifier? = nil
+    ) {
+        self.categoryPath = categoryPath
+        self.confidence = confidence
+        self.rationale = rationale
+        self.extractedKeywords = extractedKeywords
+        self.suggestedFromGraph = suggestedFromGraph
+        self.provider = provider
+        self.escalatedFrom = escalatedFrom
+    }
+    
+    /// Create from CategorizationResult
+    init(from result: CategorizationResult) {
+        self.categoryPath = result.categoryPath
+        self.confidence = result.confidence
+        self.rationale = result.rationale
+        self.extractedKeywords = result.extractedKeywords
+        self.suggestedFromGraph = result.escalatedFrom != nil
+        self.provider = result.provider
+        self.escalatedFrom = result.escalatedFrom
+    }
 }
 
 // MARK: - Ollama API Types
@@ -130,7 +183,8 @@ struct BrainConfiguration: Sendable {
 
 // MARK: - Brain Actor
 
-/// The "Brain" of SortAI - uses Ollama to categorize files based on extracted signals
+/// The "Brain" of SortAI - uses AI providers to categorize files based on extracted signals
+/// Supports Apple Intelligence, Ollama, and Cloud providers with progressive degradation
 /// Integrates with GraphRAG knowledge graph for learning and suggestions
 actor Brain: FileCategorizing {
     
@@ -141,8 +195,17 @@ actor Brain: FileCategorizing {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     
+    // Unified categorization service (v2.0) - handles provider cascade
+    private var categorizationService: UnifiedCategorizationService?
+    
+    // Whether to use unified service (defaults to true on macOS 26+)
+    private var useUnifiedService: Bool = true
+    
     // Knowledge graph for learned patterns (optional - set via setKnowledgeGraph)
     private var knowledgeGraph: KnowledgeGraphStore?
+    
+    // GraphRAG enhancer for AI-powered entity/relationship extraction
+    private var graphEnhancer: GraphRAGEnhancer?
     
     // Recent categories for context (fallback when no graph)
     private var recentCategories: [CategoryPath] = []
@@ -159,16 +222,72 @@ actor Brain: FileCategorizing {
         self.session = URLSession(configuration: sessionConfig)
     }
     
+    /// Sets the unified categorization service for v2.0 provider cascade
+    func setCategorizationService(_ service: UnifiedCategorizationService) {
+        self.categorizationService = service
+        NSLog("✅ [Brain] Unified categorization service configured")
+    }
+    
+    /// Disables unified service (forces legacy Ollama-only mode)
+    func setUseUnifiedService(_ enabled: Bool) {
+        self.useUnifiedService = enabled
+    }
+    
     /// Sets the knowledge graph for GraphRAG-based suggestions
     func setKnowledgeGraph(_ graph: KnowledgeGraphStore) {
         self.knowledgeGraph = graph
+        self.graphEnhancer = GraphRAGEnhancer(graphStore: graph)
+        
+        if let service = categorizationService {
+            Task {
+                await graphEnhancer?.setCategorizationService(service)
+            }
+        }
     }
     
     // MARK: - Public Interface
     
     /// Categorizes a file based on its extracted signature
-    /// Uses knowledge graph suggestions when available, falls back to pure LLM
+    /// Uses unified categorization service (Apple Intelligence → Ollama → Cloud → Local ML)
+    /// Falls back to legacy Ollama-only mode if service not configured
     func categorize(signature: FileSignature) async throws -> EnhancedBrainResult {
+        // Try unified service first (v2.0)
+        if useUnifiedService, let service = categorizationService {
+            return try await categorizeWithUnifiedService(signature: signature, service: service)
+        }
+        
+        // Fall back to legacy Ollama-only mode
+        return try await categorizeLegacyOllama(signature: signature)
+    }
+    
+    /// Categorize using the unified service with provider cascade
+    private func categorizeWithUnifiedService(
+        signature: FileSignature,
+        service: UnifiedCategorizationService
+    ) async throws -> EnhancedBrainResult {
+        let result = try await service.categorize(signature: signature)
+        
+        // Update knowledge graph with results (if enabled)
+        if let enhancer = graphEnhancer, !signature.textualCue.isEmpty {
+            Task {
+                try? await enhancer.processFile(
+                    url: signature.url,
+                    textContent: signature.textualCue,
+                    categoryPath: result.categoryPath,
+                    keywords: result.extractedKeywords
+                )
+            }
+        }
+        
+        // Add to recent categories
+        addRecentCategory(result.categoryPath)
+        
+        // Convert to EnhancedBrainResult
+        return EnhancedBrainResult(from: result)
+    }
+    
+    /// Legacy categorization using Ollama only
+    private func categorizeLegacyOllama(signature: FileSignature) async throws -> EnhancedBrainResult {
         // Extract keywords from signature for graph lookup
         let keywords = extractKeywords(from: signature)
         

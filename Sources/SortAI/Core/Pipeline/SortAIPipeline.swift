@@ -37,35 +37,48 @@ struct SortAIPipelineConfiguration: Sendable {
     let useMemoryFirst: Bool
     let useKnowledgeGraph: Bool
     
+    // v2.0: AI Provider settings
+    let providerPreference: ProviderPreference
+    let escalationThreshold: Double
+    let autoAcceptThreshold: Double
+    let autoInstallOllama: Bool
+    
     static let `default` = SortAIPipelineConfiguration(
         brainConfig: .default,
         embeddingDimensions: 384,
         memorySimilarityThreshold: 0.85,
         useMemoryFirst: true,
-        useKnowledgeGraph: true
+        useKnowledgeGraph: true,
+        providerPreference: .automatic,
+        escalationThreshold: 0.5,
+        autoAcceptThreshold: 0.85,
+        autoInstallOllama: true
     )
 }
 
 // MARK: - SortAI Pipeline
 
-/// Main orchestrator that connects Eye -> Memory -> Knowledge Graph -> Brain
-/// Follows the data flow: File Input -> Router -> Eye -> Memory Check -> Graph -> Brain -> Output
+/// Main orchestrator that connects Eye -> Memory -> Knowledge Graph -> Unified Categorization
+/// Follows the data flow: File Input -> Router -> Eye -> Memory Check -> Graph -> AI Provider Cascade -> Output
 /// Supports dependency injection via protocol-typed components for testing
 actor SortAIPipeline: FileProcessing {
     
     // MARK: - Components (Protocol-Typed for DI)
     
     private let inspector: any MediaInspecting
-    private let brain: any FileCategorizing
+    private let brain: any FileCategorizing  // Legacy: kept for knowledge graph updates
     private let memoryStore: any PatternMatching
     private let embeddingGenerator: any EmbeddingGenerating
     private let config: SortAIPipelineConfiguration
+    
+    // v2.0: Unified categorization service with provider cascade
+    private var categorizationService: UnifiedCategorizationService?
     
     // Concrete types for knowledge graph (optional)
     private var knowledgeGraph: KnowledgeGraphStore?
     private var feedbackManager: FeedbackManager?
     
-    // Keep reference to concrete Brain for warmup (optional)
+    // Keep reference to concrete Brain for knowledge graph updates only
     private var concreteBrain: Brain?
     
     // Performance optimization components
@@ -104,29 +117,45 @@ actor SortAIPipeline: FileProcessing {
         self.embeddingGenerator = embeddingGenerator
         self.concreteBrain = brain
         
+        // v2.0: Create unified categorization service with provider cascade
+        // Apple Intelligence → Ollama → Cloud → Local ML
+        let serviceConfig = UnifiedCategorizationService.Configuration(
+            preference: configuration.providerPreference,
+            escalationThreshold: configuration.escalationThreshold,
+            autoAcceptThreshold: configuration.autoAcceptThreshold,
+            autoInstallOllama: configuration.autoInstallOllama,
+            maxRetryAttempts: 1
+        )
+        let service = await UnifiedCategorizationService(configuration: serviceConfig)
+        self.categorizationService = service
+        
+        // Connect service to Brain for legacy compatibility
+        await brain.setCategorizationService(service)
+        
+        NSLog("✅ [Pipeline] UnifiedCategorizationService created with preference: %@", 
+              configuration.providerPreference.rawValue)
+        
         // Initialize knowledge graph if enabled
         if configuration.useKnowledgeGraph {
             do {
                 knowledgeGraph = try KnowledgeGraphStore()
                 feedbackManager = try await FeedbackManager(knowledgeGraph: knowledgeGraph!)
                 await brain.setKnowledgeGraph(knowledgeGraph!)
-                print("✅ Knowledge graph initialized")
+                
+                // Also set knowledge graph on the service's graph enhancer
+                // (service handles this internally when categorizing)
+                
+                NSLog("✅ [Pipeline] Knowledge graph initialized")
             } catch {
-                print("⚠️ Warning: Could not initialize knowledge graph: \(error)")
+                NSLog("⚠️ [Pipeline] Could not initialize knowledge graph: %@", error.localizedDescription)
             }
         }
         
-        // Verify brain is available
-        let brainHealthy = await brain.healthCheck()
-        if !brainHealthy {
-            print("⚠️ Warning: Ollama is not available. Memory-only mode enabled.")
-        } else {
-            // OPTIMIZATION: Warm up models in background to eliminate first-use load time
-            Task {
-                await brain.warmup()
-                print("✅ Models warmed up and ready")
-            }
-        }
+        // Provider availability is handled internally by UnifiedCategorizationService
+        // No need for explicit Ollama health check - the cascade handles this
+        let stats = await service.getStatistics()
+        NSLog("📱 [Pipeline] Providers available: %@", 
+              stats.availableProviders.map { $0.displayName }.joined(separator: ", "))
         
         isInitialized = true
     }
@@ -313,13 +342,45 @@ actor SortAIPipeline: FileProcessing {
         return try? memoryStore.queryNearest(embedding: embedding, threshold: config.memorySimilarityThreshold)
     }
     
-    /// Brain categorization helper - uses enhanced result with flexible categories
+    /// Categorization helper - uses UnifiedCategorizationService with provider cascade
+    /// Provider cascade: Apple Intelligence → Ollama → Cloud → Local ML
     private func performBrainCategorization(signature: FileSignature) async -> BrainResult {
+        // v2.0: Use unified service directly for provider cascade
+        if let service = categorizationService {
+            do {
+                let result = try await service.categorize(signature: signature)
+                
+                // Log which provider was used
+                NSLog("✅ [Pipeline] Categorized with %@: %@ (%.1f%%)",
+                      result.provider.displayName,
+                      result.categoryPath.description,
+                      result.confidence * 100)
+                
+                // Convert CategorizationResult to BrainResult for backward compatibility
+                return BrainResult(
+                    category: result.categoryPath.root,
+                    subcategory: result.categoryPath.components.dropFirst().first,
+                    confidence: result.confidence,
+                    rationale: result.rationale,
+                    suggestedPath: result.categoryPath.description,
+                    tags: result.extractedKeywords,
+                    allSubcategories: Array(result.categoryPath.components.dropFirst()),
+                    provider: result.provider  // Track which provider was used
+                )
+            } catch {
+                NSLog("⚠️ [Pipeline] Categorization failed: %@", error.localizedDescription)
+                return BrainResult(
+                    category: "Uncategorized",
+                    subcategory: "Error",
+                    confidence: 0.0,
+                    rationale: "Categorization failed: \(error.localizedDescription)"
+                )
+            }
+        }
+        
+        // Fallback: Use Brain directly (legacy path)
         do {
-            // Use enhanced categorization with GraphRAG support
             let enhanced = try await brain.categorize(signature: signature)
-            
-            // Convert to BrainResult preserving full category path
             return BrainResult(
                 category: enhanced.category,
                 subcategory: enhanced.subcategories.first,
@@ -327,7 +388,7 @@ actor SortAIPipeline: FileProcessing {
                 rationale: enhanced.rationale,
                 suggestedPath: enhanced.categoryPath.description,
                 tags: enhanced.extractedKeywords,
-                allSubcategories: enhanced.subcategories  // Preserve ALL subcategories
+                allSubcategories: enhanced.subcategories
             )
         } catch {
             return BrainResult(

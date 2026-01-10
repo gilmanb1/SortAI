@@ -331,9 +331,16 @@ struct CondensedCategoryPathView: View {
 /// Shows confidence level with color coding
 struct ConfidenceBadge: View {
     let confidence: Double
+    var provider: LLMProviderIdentifier? = nil
+    var showProviderBadge: Bool = true
     
     var body: some View {
         HStack(spacing: 4) {
+            // Provider badge (SF Symbol for Apple, emoji for Ollama)
+            if let provider = provider, showProviderBadge {
+                ProviderBadge(provider: provider, compact: true)
+            }
+            
             Circle()
                 .fill(confidenceColor)
                 .frame(width: 8, height: 8)
@@ -349,6 +356,65 @@ struct ConfidenceBadge: View {
         case 0.8...1.0: return .green
         case 0.5..<0.8: return .orange
         default: return .red
+        }
+    }
+}
+
+// MARK: - Provider Badge
+
+/// Shows which AI provider categorized the file
+struct ProviderBadge: View {
+    let provider: LLMProviderIdentifier
+    var compact: Bool = false
+    
+    var body: some View {
+        HStack(spacing: compact ? 2 : 4) {
+            providerIcon
+            
+            if !compact {
+                Text(provider.displayName)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, compact ? 4 : 6)
+        .padding(.vertical, compact ? 2 : 3)
+        .background(providerBackground)
+        .clipShape(Capsule())
+        .help("\(provider.displayName)")
+    }
+    
+    @ViewBuilder
+    private var providerIcon: some View {
+        switch provider {
+        case .appleIntelligence:
+            Image(systemName: "apple.logo")
+                .font(.system(size: compact ? 10 : 12))
+                .foregroundStyle(.primary)
+        case .ollama:
+            Text("🦙")
+                .font(.system(size: compact ? 10 : 12))
+        case .openAI, .anthropic:
+            Image(systemName: "cloud")
+                .font(.system(size: compact ? 10 : 12))
+                .foregroundStyle(.blue)
+        case .localML:
+            Image(systemName: "cpu")
+                .font(.system(size: compact ? 10 : 12))
+                .foregroundStyle(.secondary)
+        }
+    }
+    
+    private var providerBackground: some ShapeStyle {
+        switch provider {
+        case .appleIntelligence:
+            return Color.purple.opacity(0.1)
+        case .ollama:
+            return Color.orange.opacity(0.1)
+        case .openAI, .anthropic:
+            return Color.blue.opacity(0.1)
+        case .localML:
+            return Color.gray.opacity(0.1)
         }
     }
 }
@@ -968,6 +1034,7 @@ struct FeedbackDisplayItem: Identifiable {
     let rationale: String
     let keywords: [String]
     var status: FeedbackItem.FeedbackStatus
+    var provider: LLMProviderIdentifier?  // Which AI provider categorized this
     
     var needsReview: Bool {
         status == .pending
@@ -983,7 +1050,8 @@ struct FeedbackDisplayItem: Identifiable {
         confidence: Double,
         rationale: String,
         keywords: [String],
-        status: FeedbackItem.FeedbackStatus
+        status: FeedbackItem.FeedbackStatus,
+        provider: LLMProviderIdentifier? = nil
     ) {
         self.id = id
         self.fileName = fileName
@@ -994,6 +1062,7 @@ struct FeedbackDisplayItem: Identifiable {
         self.rationale = rationale
         self.keywords = keywords
         self.status = status
+        self.provider = provider
     }
     
     init(from feedbackItem: FeedbackItem) {
@@ -1006,6 +1075,8 @@ struct FeedbackDisplayItem: Identifiable {
         self.rationale = feedbackItem.rationale
         self.keywords = feedbackItem.keywords
         self.status = feedbackItem.status
+        // TODO: Load provider from feedbackItem.providerIdentifier once persisted
+        self.provider = nil
     }
     
     private static func iconForFile(_ filename: String) -> String {

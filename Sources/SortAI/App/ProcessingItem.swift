@@ -102,6 +102,10 @@ final class ProcessingItem: Identifiable {
     var quickConfidence: Double = 0
     var isRefining: Bool = false  // True while full analysis is running
     
+    // Provider tracking (v2.0)
+    var provider: LLMProviderIdentifier?
+    var escalatedFrom: LLMProviderIdentifier?  // Set if result came from escalation
+    
     // Estimated processing time (for progress bar)
     var estimatedTime: TimeInterval?
     var startedAt: Date?

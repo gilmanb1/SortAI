@@ -13,12 +13,12 @@ final class AppConfigurationTests: XCTestCase {
     func testDefaultConfigurationHasCorrectValues() {
         let config = AppConfiguration.default
         
-        // Verify version
-        XCTAssertEqual(config.version, 1)
+        // Verify version (v2 = Apple Intelligence support)
+        XCTAssertEqual(config.version, AppConfiguration.currentVersion)
         
         // Verify Ollama defaults
         XCTAssertEqual(config.ollama.host, "http://127.0.0.1:11434")
-        XCTAssertEqual(config.ollama.documentModel, "llama3.2")
+        XCTAssertEqual(config.ollama.documentModel, OllamaConfiguration.defaultModel)
         XCTAssertEqual(config.ollama.temperature, 0.3)
         XCTAssertEqual(config.ollama.maxTokens, 1000)
         XCTAssertEqual(config.ollama.timeout, 60.0)
@@ -161,7 +161,7 @@ final class AppConfigurationTests: XCTestCase {
         
         // Should have default values
         XCTAssertEqual(config.ollama.host, "http://127.0.0.1:11434")
-        XCTAssertEqual(config.ollama.documentModel, "llama3.2")
+        XCTAssertEqual(config.ollama.documentModel, OllamaConfiguration.defaultModel)
     }
     
     func testFromUserDefaultsWithSavedValues() {
@@ -436,7 +436,7 @@ final class ConfigurationManagerTests: XCTestCase {
     
     func testInitialConfigurationIsDefault() {
         // When loading from non-existent file, should use defaults
-        XCTAssertEqual(manager.config.version, 1)
+        XCTAssertEqual(manager.config.version, AppConfiguration.currentVersion)
         XCTAssertFalse(manager.hasUnsavedChanges)
     }
     

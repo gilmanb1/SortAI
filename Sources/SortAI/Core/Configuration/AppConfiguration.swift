@@ -103,6 +103,14 @@ enum SortAIDefaultsKey {
     static let respectBatteryStatus = "respectBatteryStatus"
     static let enableWatchMode = "enableWatchMode"
     static let watchQuietPeriod = "watchQuietPeriod"
+    
+    // v2.0 Apple Intelligence settings
+    static let providerPreference = "providerPreference"
+    static let escalationThreshold = "escalationThreshold"
+    static let autoAcceptThreshold = "autoAcceptThreshold"
+    static let autoInstallOllama = "autoInstallOllama"
+    static let enableFAISS = "enableFAISS"
+    static let useAppleEmbeddings = "useAppleEmbeddings"
 }
 
 /// Registers default values in UserDefaults at app startup
@@ -112,6 +120,14 @@ enum SortAIDefaults {
     /// This ensures consistent defaults across the app and persistence across sessions
     static func registerDefaults() {
         let defaults: [String: Any] = [
+            // AI Provider settings (v2.0) - Apple Intelligence as default
+            SortAIDefaultsKey.providerPreference: ProviderPreference.automatic.rawValue,
+            SortAIDefaultsKey.escalationThreshold: 0.5,
+            SortAIDefaultsKey.autoAcceptThreshold: 0.85,
+            SortAIDefaultsKey.autoInstallOllama: true,
+            SortAIDefaultsKey.enableFAISS: false,
+            SortAIDefaultsKey.useAppleEmbeddings: true,
+            
             // Ollama settings - using deepseek-r1 as default model
             SortAIDefaultsKey.ollamaHost: "http://127.0.0.1:11434",
             SortAIDefaultsKey.documentModel: OllamaConfiguration.defaultModel,
@@ -119,7 +135,7 @@ enum SortAIDefaults {
             SortAIDefaultsKey.imageModel: OllamaConfiguration.defaultModel,
             SortAIDefaultsKey.audioModel: OllamaConfiguration.defaultModel,
             SortAIDefaultsKey.embeddingModel: OllamaConfiguration.defaultModel,
-            SortAIDefaultsKey.embeddingDimensions: 384,
+            SortAIDefaultsKey.embeddingDimensions: 512,  // Updated for Apple NLEmbedding compatibility
             
             // Organization settings
             SortAIDefaultsKey.defaultOrganizationMode: OrganizationMode.copy.rawValue,
@@ -141,12 +157,20 @@ enum SortAIDefaults {
         ]
         
         UserDefaults.standard.register(defaults: defaults)
-        NSLog("📋 [CONFIG] Registered defaults with model: %@", OllamaConfiguration.defaultModel)
+        NSLog("📋 [CONFIG] Registered defaults with AI Provider: automatic (Apple Intelligence + fallback)")
     }
     
     /// Returns the current default model name
     static var defaultModel: String {
         OllamaConfiguration.defaultModel
+    }
+    
+    /// Check if Apple Intelligence is available on this system
+    static var isAppleIntelligenceAvailable: Bool {
+        if #available(macOS 26.0, *) {
+            return true
+        }
+        return false
     }
 }
 
@@ -388,6 +412,78 @@ struct ProcessingConfiguration: Codable, Sendable, Equatable {
     )
 }
 
+/// AI Provider configuration (Apple Intelligence, Ollama, Cloud)
+struct AIProviderConfiguration: Codable, Sendable, Equatable {
+    /// User preference for LLM provider selection
+    var preference: ProviderPreference
+    
+    /// Confidence threshold for escalating to next provider (0.0-1.0)
+    var escalationThreshold: Double
+    
+    /// Confidence threshold for auto-accepting categorizations (0.0-1.0)
+    var autoAcceptThreshold: Double
+    
+    /// Whether to automatically install Ollama if not found
+    var autoInstallOllama: Bool
+    
+    /// Whether to enable FAISS for vector similarity search
+    var enableFAISS: Bool
+    
+    /// Whether to use Apple NLEmbedding for embeddings (vs NGram)
+    var useAppleEmbeddings: Bool
+    
+    /// Weight for Apple Intelligence embeddings when combining (0.0-1.0)
+    var appleEmbeddingWeight: Double
+    
+    /// Maximum retry attempts per provider
+    var maxRetryAttempts: Int
+    
+    /// Session pool size for Apple Intelligence
+    var sessionPoolSize: Int
+    
+    /// Request timeout in seconds
+    var requestTimeout: TimeInterval
+    
+    static let `default` = AIProviderConfiguration(
+        preference: .automatic,
+        escalationThreshold: 0.5,
+        autoAcceptThreshold: 0.85,
+        autoInstallOllama: true,
+        enableFAISS: false,
+        useAppleEmbeddings: true,
+        appleEmbeddingWeight: 0.6,
+        maxRetryAttempts: 1,
+        sessionPoolSize: 3,
+        requestTimeout: 30.0
+    )
+    
+    static let appleOnly = AIProviderConfiguration(
+        preference: .appleIntelligenceOnly,
+        escalationThreshold: 0.5,
+        autoAcceptThreshold: 0.85,
+        autoInstallOllama: false,
+        enableFAISS: false,
+        useAppleEmbeddings: true,
+        appleEmbeddingWeight: 1.0,
+        maxRetryAttempts: 2,
+        sessionPoolSize: 3,
+        requestTimeout: 30.0
+    )
+    
+    static let ollamaPreferred = AIProviderConfiguration(
+        preference: .preferOllama,
+        escalationThreshold: 0.5,
+        autoAcceptThreshold: 0.85,
+        autoInstallOllama: true,
+        enableFAISS: false,
+        useAppleEmbeddings: false,
+        appleEmbeddingWeight: 0.3,
+        maxRetryAttempts: 1,
+        sessionPoolSize: 2,
+        requestTimeout: 60.0
+    )
+}
+
 // MARK: - Environment
 
 /// Runtime environment for configuration overrides
@@ -416,11 +512,14 @@ enum AppEnvironment: String, Codable, Sendable, CaseIterable {
 /// Complete application configuration
 /// Consolidates all settings into a single, type-safe structure
 struct AppConfiguration: Codable, Sendable, Equatable {
-    /// Configuration file format version
+    /// Configuration file format version (2 = Apple Intelligence support)
     var version: Int
     
     /// Runtime environment
     var environment: AppEnvironment
+    
+    /// AI Provider settings (Apple Intelligence, Ollama, Cloud)
+    var aiProvider: AIProviderConfiguration
     
     /// Ollama LLM settings
     var ollama: OllamaConfiguration
@@ -449,11 +548,15 @@ struct AppConfiguration: Codable, Sendable, Equatable {
     /// Application-level settings
     var lastOutputFolder: String?
     
+    /// Current configuration version
+    static let currentVersion = 2
+    
     // MARK: - Defaults
     
     static let `default` = AppConfiguration(
-        version: 1,
+        version: currentVersion,
         environment: AppEnvironment.current,
+        aiProvider: AIProviderConfiguration.default,
         ollama: OllamaConfiguration.default,
         memory: MemoryConfiguration.default,
         knowledgeGraph: KnowledgeGraphConfiguration.default,
@@ -466,8 +569,9 @@ struct AppConfiguration: Codable, Sendable, Equatable {
     )
     
     static let testing = AppConfiguration(
-        version: 1,
+        version: currentVersion,
         environment: AppEnvironment.testing,
+        aiProvider: AIProviderConfiguration.default,
         ollama: OllamaConfiguration.default,
         memory: MemoryConfiguration.default,
         knowledgeGraph: KnowledgeGraphConfiguration.default,
@@ -484,6 +588,20 @@ struct AppConfiguration: Codable, Sendable, Equatable {
     /// Validates configuration values and returns any errors
     func validate() -> [ConfigurationError] {
         var errors: [ConfigurationError] = []
+        
+        // AI Provider validation
+        if aiProvider.escalationThreshold < 0 || aiProvider.escalationThreshold > 1 {
+            errors.append(.invalidValue("aiProvider.escalationThreshold", "Must be between 0.0 and 1.0"))
+        }
+        if aiProvider.autoAcceptThreshold < 0 || aiProvider.autoAcceptThreshold > 1 {
+            errors.append(.invalidValue("aiProvider.autoAcceptThreshold", "Must be between 0.0 and 1.0"))
+        }
+        if aiProvider.appleEmbeddingWeight < 0 || aiProvider.appleEmbeddingWeight > 1 {
+            errors.append(.invalidValue("aiProvider.appleEmbeddingWeight", "Must be between 0.0 and 1.0"))
+        }
+        if aiProvider.sessionPoolSize < 1 || aiProvider.sessionPoolSize > 10 {
+            errors.append(.invalidValue("aiProvider.sessionPoolSize", "Must be between 1 and 10"))
+        }
         
         // Ollama validation
         if ollama.temperature < 0 || ollama.temperature > 2 {
@@ -519,6 +637,22 @@ struct AppConfiguration: Codable, Sendable, Equatable {
     
     var isValid: Bool {
         validate().isEmpty
+    }
+    
+    // MARK: - Migration
+    
+    /// Migrate from older configuration versions
+    static func migrate(from oldConfig: AppConfiguration) -> AppConfiguration {
+        var newConfig = oldConfig
+        
+        // Version 1 -> 2: Add AI provider settings
+        if oldConfig.version < 2 {
+            newConfig.aiProvider = AIProviderConfiguration.default
+            newConfig.version = 2
+            NSLog("📋 [CONFIG] Migrated from version 1 to 2 (added AI provider settings)")
+        }
+        
+        return newConfig
     }
 }
 
