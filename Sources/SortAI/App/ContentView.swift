@@ -77,8 +77,8 @@ struct ContentView: View {
         let state = WizardState()
         let scanner = FilenameScanner()
         
-        // Create inference engine if LLM is available
-        let provider = OllamaProvider()
+        // Create inference engine using provider preference from settings
+        let provider = createLLMProviderFromPreference()
         let engine = TaxonomyInferenceEngine(provider: provider)
         
         return WizardView(
@@ -114,6 +114,33 @@ struct ContentView: View {
         // The wizard handles file organization internally
         // We could update appState here with results
         NSLog("📊 [DEBUG] Wizard completed with \(taxonomy.categoryCount) categories")
+    }
+    
+    /// Create the appropriate LLM provider based on user preference
+    @MainActor
+    private func createLLMProviderFromPreference() -> any LLMProvider {
+        let preferenceRaw = UserDefaults.standard.string(forKey: SortAIDefaultsKey.providerPreference)
+            ?? ProviderPreference.automatic.rawValue
+        let preference = ProviderPreference(rawValue: preferenceRaw) ?? .automatic
+        
+        switch preference {
+        case .automatic, .appleIntelligenceOnly:
+            // Try Apple Intelligence first
+            let appleProvider = AppleIntelligenceLLMFactory.create()
+            NSLog("🤖 [ContentView] Using Apple Intelligence provider (preference: \(preference.rawValue))")
+            return appleProvider
+            
+        case .preferOllama:
+            // Use Ollama
+            NSLog("🤖 [ContentView] Using Ollama provider (preference: \(preference.rawValue))")
+            return OllamaProvider()
+            
+        case .cloud:
+            // Use OpenAI provider (fallback to Ollama if not configured)
+            NSLog("🤖 [ContentView] Using Cloud provider (preference: \(preference.rawValue))")
+            // For now, fall back to Ollama since cloud isn't fully configured
+            return OllamaProvider()
+        }
     }
     
     // MARK: - Subviews

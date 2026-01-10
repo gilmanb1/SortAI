@@ -52,6 +52,7 @@ final class AppState {
     // Model status
     var modelStatus: ModelSetupStatus = .checking
     var activeModel: String?
+    var actualProviderUsed: LLMProviderIdentifier?  // Tracks the actual provider used in the last categorization
     var modelDownloadProgress: Double = 0
     var modelDownloadStatus: String = ""
     
@@ -160,14 +161,18 @@ final class AppState {
                 : appConfig.aiProvider.preference.rawValue
             NSLog("✅ [DEBUG] Pipeline initialized with provider preference: %@", preferenceDesc)
             
-            // Set active model display based on preference
+            // Set initial active model display based on preference
+            // This will be updated with the actual provider used after first categorization
             switch appConfig.aiProvider.preference {
             case .automatic, .appleIntelligenceOnly:
                 activeModel = "Apple Intelligence"
+                actualProviderUsed = .appleIntelligence
             case .preferOllama:
                 activeModel = appConfig.ollama.documentModel
+                actualProviderUsed = .ollama
             case .cloud:
                 activeModel = "Cloud (OpenAI)"
+                actualProviderUsed = .openAI
             }
             
         } catch {
@@ -289,6 +294,13 @@ final class AppState {
                     item.isRefining = false
                     item.progress = 0.9
                     
+                    // Update actual provider used display
+                    if let provider = result.brainResult.provider {
+                        self.actualProviderUsed = provider
+                        self.activeModel = provider.displayName
+                        NSLog("🤖 [AppState] Categorization used provider: %@", provider.displayName)
+                    }
+                    
                     if result.brainResult.confidence >= 0.85 {
                         item.status = .accepted
                         Task { @MainActor in
@@ -361,6 +373,13 @@ final class AppState {
                 let result = try await pipeline.process(url: item.url)
                 item.result = result
                 item.progress = 0.8
+                
+                // Update actual provider used display
+                if let provider = result.brainResult.provider {
+                    self.actualProviderUsed = provider
+                    self.activeModel = provider.displayName
+                    NSLog("🤖 [AppState] Categorization used provider: %@", provider.displayName)
+                }
                 
                 // Determine if we need review
                 if result.brainResult.confidence >= 0.85 {

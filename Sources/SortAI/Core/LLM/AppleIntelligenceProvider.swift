@@ -128,8 +128,11 @@ actor AppleIntelligenceProvider: LLMCategorizationProvider {
     private var sessionPool: [LanguageModelSession] = []
     private var sessionIndex = 0
     private var isInitialized = false
-    private var availabilityChecked = false
-    private var cachedAvailability: Bool = false
+    
+    // Time-based availability cache (5 minutes)
+    private var cachedAvailability: Bool?
+    private var availabilityCacheTime: Date?
+    private let availabilityCacheDuration: TimeInterval = 300  // 5 minutes
     
     // MARK: - Initialization
     
@@ -140,28 +143,35 @@ actor AppleIntelligenceProvider: LLMCategorizationProvider {
     // MARK: - Availability Check
     
     func isAvailable() async -> Bool {
-        // Return cached result if we've already checked
-        if availabilityChecked {
-            return cachedAvailability
+        // Check if we have a valid cached result (within 5 minutes)
+        if let cached = cachedAvailability,
+           let cacheTime = availabilityCacheTime,
+           Date().timeIntervalSince(cacheTime) < availabilityCacheDuration {
+            return cached
         }
         
-        // macOS 26+ is guaranteed by the @available annotation on this actor
-        // Try to initialize a session to verify Apple Intelligence is actually available
-        do {
-            let testSession = LanguageModelSession()
-            // Quick test to verify it works
-            _ = try await testSession.respond(to: "test")
-            
-            cachedAvailability = true
-            availabilityChecked = true
-            NSLog("✅ [AppleIntelligence] Available and ready")
-            return true
-        } catch {
-            NSLog("❌ [AppleIntelligence] Not available: \(error.localizedDescription)")
-            cachedAvailability = false
-            availabilityChecked = true
-            return false
+        // Use simple property check instead of making an API call
+        // LanguageModelSession.isSupported is a lightweight check
+        let supported = LanguageModelSession.isSupported
+        
+        // Cache the result with timestamp
+        cachedAvailability = supported
+        availabilityCacheTime = Date()
+        
+        if supported {
+            NSLog("✅ [AppleIntelligence] Available (LanguageModelSession.isSupported = true)")
+        } else {
+            NSLog("⚠️ [AppleIntelligence] Not supported on this device")
         }
+        
+        return supported
+    }
+    
+    /// Force refresh the availability cache
+    func refreshAvailability() async -> Bool {
+        cachedAvailability = nil
+        availabilityCacheTime = nil
+        return await isAvailable()
     }
     
     // MARK: - Session Management
