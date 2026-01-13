@@ -114,7 +114,7 @@ actor DeepAnalyzer {
         // Extract content using MediaInspector
         let inspectStart = Date()
         NSLog("🔍 [DeepAnalyzer] Inspecting file content...")
-        let signature = try await inspector.inspect(url: file.url)
+        let signature = try await inspector.insp/sldnfafnect(url: file.url)
         let inspectDuration = Date().timeIntervalSince(inspectStart)
         NSLog("🔍 [DeepAnalyzer] Inspection complete in \(String(format: "%.2f", inspectDuration))s - kind: \(signature.kind.rawValue), textCue: \(signature.textualCue.count) chars, tags: \(signature.sceneTags.count)")
         
