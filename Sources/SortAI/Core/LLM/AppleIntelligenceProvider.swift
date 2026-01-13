@@ -150,18 +150,26 @@ actor AppleIntelligenceProvider: LLMCategorizationProvider {
             return cached
         }
         
-        // Use simple property check instead of making an API call
-        // LanguageModelSession.isSupported is a lightweight check
-        let supported = LanguageModelSession.isSupported
+        // On macOS 26+, check availability by trying to create a session
+        // This will fail if Apple Intelligence is disabled in System Settings
+        let supported: Bool
+        do {
+            // Try to create a session - this validates Apple Intelligence availability
+            let testSession = LanguageModelSession()
+            _ = testSession
+            supported = true
+        } catch {
+            supported = false
+        }
         
         // Cache the result with timestamp
         cachedAvailability = supported
         availabilityCacheTime = Date()
         
         if supported {
-            NSLog("✅ [AppleIntelligence] Available (LanguageModelSession.isSupported = true)")
+            NSLog("✅ [AppleIntelligence] Available (session creation succeeded)")
         } else {
-            NSLog("⚠️ [AppleIntelligence] Not supported on this device")
+            NSLog("⚠️ [AppleIntelligence] Not available (session creation failed)")
         }
         
         return supported

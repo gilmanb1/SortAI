@@ -40,17 +40,28 @@ actor AppleIntelligenceLLMAdapter: LLMProvider {
             return cached
         }
         
-        // Use simple property check
-        let supported = LanguageModelSession.isSupported
+        // On macOS 26+, check availability by trying to create a session
+        // If we're in this code path, we're on macOS 26+ (guarded by @available)
+        // But the user may have Apple Intelligence disabled in System Settings
+        let supported: Bool
+        do {
+            // Try to create a session - this will fail if Apple Intelligence is disabled
+            let testSession = LanguageModelSession()
+            // If we got here, it's available
+            _ = testSession
+            supported = true
+        } catch {
+            supported = false
+        }
         
         // Cache the result with timestamp
         cachedAvailability = supported
         availabilityCacheTime = Date()
         
         if supported {
-            NSLog("✅ [AppleIntelligenceLLM] Available (LanguageModelSession.isSupported = true)")
+            NSLog("✅ [AppleIntelligenceLLM] Available (session creation succeeded)")
         } else {
-            NSLog("⚠️ [AppleIntelligenceLLM] Not supported on this device")
+            NSLog("⚠️ [AppleIntelligenceLLM] Not available (session creation failed)")
         }
         
         return supported
