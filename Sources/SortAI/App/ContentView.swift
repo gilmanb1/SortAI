@@ -310,6 +310,43 @@ struct ContentView: View {
             // Model & Pipeline Status
             modelStatusIndicator
             
+            // Undo/Redo buttons (when operations available)
+            if appState.canUndoLastMove || appState.canRedoLastMove {
+                HStack(spacing: 4) {
+                    Button {
+                        Task { await appState.undoLastMove() }
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(appState.canUndoLastMove ? .primary : .tertiary)
+                    .disabled(!appState.canUndoLastMove)
+                    .help("Undo last file move (⌘Z)")
+                    .keyboardShortcut("z", modifiers: .command)
+                    
+                    Button {
+                        Task { await appState.redoLastMove() }
+                    } label: {
+                        Image(systemName: "arrow.uturn.forward")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(appState.canRedoLastMove ? .primary : .tertiary)
+                    .disabled(!appState.canRedoLastMove)
+                    .help("Redo last undone move (⇧⌘Z)")
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    
+                    if appState.undoableOperationsCount > 0 {
+                        Text("\(appState.undoableOperationsCount)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.secondary.opacity(0.1))
+                .cornerRadius(4)
+            }
+            
             // Stats
             if appState.totalProcessed > 0 {
                 HStack(spacing: 12) {
