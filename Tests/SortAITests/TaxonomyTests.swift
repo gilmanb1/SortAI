@@ -1123,3 +1123,194 @@ struct HierarchyScanningTests {
     }
 }
 
+// MARK: - FolderCategorizer Tests
+
+@Suite("FolderCategorizer Tests")
+struct FolderCategorizerTests {
+    
+    @Test("FolderCategoryAssignment creation")
+    func testFolderCategoryAssignmentCreation() {
+        let assignment = FolderCategoryAssignment(
+            folderId: UUID(),
+            folderName: "Resumes",
+            categoryPath: ["Work", "Job Search", "Application Materials"],
+            confidence: 0.92,
+            rationale: "Folder contains resume documents",
+            alternativePaths: [["Documents", "Work"]]
+        )
+        
+        #expect(assignment.folderName == "Resumes")
+        #expect(assignment.categoryPath.count == 3)
+        #expect(assignment.pathString == "Work / Job Search / Application Materials")
+        #expect(assignment.confidence == 0.92)
+        #expect(assignment.alternativePaths.count == 1)
+    }
+    
+    @Test("Quick categorize resume folder")
+    func testQuickCategorizeResumeFolder() {
+        let folder = ScannedFolder(
+            url: URL(fileURLWithPath: "/test/Resumes"),
+            folderName: "Resumes",
+            relativePath: "Resumes",
+            depth: 1,
+            containedFiles: [
+                TaxonomyScannedFile(
+                    url: URL(fileURLWithPath: "/test/Resumes/resume.pdf"),
+                    filename: "resume.pdf",
+                    fileExtension: "pdf",
+                    fileSize: 1000,
+                    modificationDate: Date()
+                )
+            ],
+            totalSize: 1000,
+            modifiedAt: nil
+        )
+        
+        let assignment = FolderCategorizer.quickCategorize(folder: folder)
+        
+        #expect(assignment.folderName == "Resumes")
+        #expect(assignment.categoryPath.contains("Job Search") || assignment.categoryPath.contains("Work"))
+        #expect(assignment.confidence >= 0.8)
+    }
+    
+    @Test("Quick categorize photo folder")
+    func testQuickCategorizePhotoFolder() {
+        let folder = ScannedFolder(
+            url: URL(fileURLWithPath: "/test/Photos"),
+            folderName: "Photos",
+            relativePath: "Photos",
+            depth: 1,
+            containedFiles: [
+                TaxonomyScannedFile(
+                    url: URL(fileURLWithPath: "/test/Photos/vacation.jpg"),
+                    filename: "vacation.jpg",
+                    fileExtension: "jpg",
+                    fileSize: 5000,
+                    modificationDate: Date()
+                )
+            ],
+            totalSize: 5000,
+            modifiedAt: nil
+        )
+        
+        let assignment = FolderCategorizer.quickCategorize(folder: folder)
+        
+        #expect(assignment.categoryPath.contains("Photos") || assignment.categoryPath.contains("Media"))
+        #expect(assignment.confidence >= 0.7)
+    }
+    
+    @Test("Quick categorize video folder")
+    func testQuickCategorizeVideoFolder() {
+        let folder = ScannedFolder(
+            url: URL(fileURLWithPath: "/test/Videos"),
+            folderName: "My_Videos",
+            relativePath: "My_Videos",
+            depth: 1,
+            containedFiles: [
+                TaxonomyScannedFile(
+                    url: URL(fileURLWithPath: "/test/Videos/movie.mp4"),
+                    filename: "movie.mp4",
+                    fileExtension: "mp4",
+                    fileSize: 50000,
+                    modificationDate: Date()
+                )
+            ],
+            totalSize: 50000,
+            modifiedAt: nil
+        )
+        
+        let assignment = FolderCategorizer.quickCategorize(folder: folder)
+        
+        #expect(assignment.categoryPath.contains("Videos") || assignment.categoryPath.contains("Media"))
+        #expect(assignment.confidence >= 0.7)
+    }
+    
+    @Test("Quick categorize by file type when name unclear")
+    func testQuickCategorizeByFileType() {
+        let folder = ScannedFolder(
+            url: URL(fileURLWithPath: "/test/RandomFolder"),
+            folderName: "RandomFolder123",
+            relativePath: "RandomFolder123",
+            depth: 1,
+            containedFiles: [
+                TaxonomyScannedFile(
+                    url: URL(fileURLWithPath: "/test/RandomFolder/1.jpg"),
+                    filename: "1.jpg",
+                    fileExtension: "jpg",
+                    fileSize: 1000,
+                    modificationDate: Date()
+                ),
+                TaxonomyScannedFile(
+                    url: URL(fileURLWithPath: "/test/RandomFolder/2.jpg"),
+                    filename: "2.jpg",
+                    fileExtension: "jpg",
+                    fileSize: 1000,
+                    modificationDate: Date()
+                ),
+                TaxonomyScannedFile(
+                    url: URL(fileURLWithPath: "/test/RandomFolder/3.png"),
+                    filename: "3.png",
+                    fileExtension: "png",
+                    fileSize: 1000,
+                    modificationDate: Date()
+                )
+            ],
+            totalSize: 3000,
+            modifiedAt: nil
+        )
+        
+        let assignment = FolderCategorizer.quickCategorize(folder: folder)
+        
+        // Should categorize as photos since all files are images
+        #expect(assignment.categoryPath.contains("Photos") || assignment.categoryPath.contains("Media"))
+        #expect(assignment.rationale.contains("image"))
+    }
+    
+    @Test("Quick categorize project folder")
+    func testQuickCategorizeProjectFolder() {
+        let folder = ScannedFolder(
+            url: URL(fileURLWithPath: "/test/MyProject"),
+            folderName: "MyProject_2024",
+            relativePath: "MyProject_2024",
+            depth: 1,
+            containedFiles: [],
+            totalSize: 0,
+            modifiedAt: nil
+        )
+        
+        let assignment = FolderCategorizer.quickCategorize(folder: folder)
+        
+        #expect(assignment.categoryPath.contains("Projects") || assignment.categoryPath.contains("Work"))
+        #expect(assignment.confidence >= 0.6)
+    }
+    
+    @Test("Quick categorize unknown folder")
+    func testQuickCategorizeUnknownFolder() {
+        let folder = ScannedFolder(
+            url: URL(fileURLWithPath: "/test/abc123xyz"),
+            folderName: "abc123xyz",
+            relativePath: "abc123xyz",
+            depth: 1,
+            containedFiles: [],
+            totalSize: 0,
+            modifiedAt: nil
+        )
+        
+        let assignment = FolderCategorizer.quickCategorize(folder: folder)
+        
+        // Unknown folders should have low confidence
+        #expect(assignment.categoryPath.contains("Uncategorized"))
+        #expect(assignment.confidence < 0.5)
+    }
+    
+    @Test("FolderCategorizer configuration defaults")
+    func testFolderCategorizerConfiguration() {
+        let config = FolderCategorizer.Configuration.default
+        
+        #expect(config.reviewThreshold == 0.75)
+        #expect(config.maxFilesInContext == 50)
+        #expect(config.includeFileTypeSummary == true)
+        #expect(config.analyzeFolderName == true)
+    }
+}
+
