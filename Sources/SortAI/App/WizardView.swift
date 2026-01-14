@@ -1080,49 +1080,104 @@ struct InferringStep: View {
         // Short pause to show results
         try? await Task.sleep(for: .milliseconds(300))
         
-        // ========== PHASE 2: Background LLM Refinement ==========
+        // ========== PHASE 2: LLM Full Hierarchy Inference ==========
         await MainActor.run {
             state.isRefining = true
-            state.statusMessage = "Refining with AI (you can proceed anytime)..."
+            state.statusMessage = "Getting full hierarchy from AI..."
         }
         
-        // Start refinement in background (non-blocking)
-        await builder.startRefinement(taxonomy: taxonomy) { updatedTaxonomy, progress in
-            Task { @MainActor in
-                state.refinementProgress = progress
-                state.inferenceProgress = 0.5 + (progress.percentage * 0.5)
+        NSLog("🧠 [WizardInfer] ========== PHASE 2: LLM HIERARCHY INFERENCE ==========")
+        let phase2Start = Date()
+        
+        // Get LLM provider for TaxonomyInferenceEngine
+        let ollamaProvider = await LLMProviderRegistry.shared.provider(id: "ollama")
+        let defaultProv = await LLMProviderRegistry.shared.defaultProvider()
+        
+        if let llmProvider = ollamaProvider ?? defaultProv {
+            NSLog("🧠 [WizardInfer] Using LLM provider: \(llmProvider.identifier)")
+            
+            // Create inference engine to get full hierarchies from LLM
+            let inferenceEngine = TaxonomyInferenceEngine(provider: llmProvider)
+            let filenames = files.map { $0.filename }
+            let options = LLMOptions.default(model: "llama3.2")
+            
+            do {
+                // Get LLM's suggested full hierarchy structure
+                let llmTaxonomy = try await inferenceEngine.inferTaxonomy(
+                    from: filenames,
+                    rootName: rootName,
+                    options: options
+                )
                 
-                if progress.isComplete {
-                    state.isRefining = false
-                    state.statusMessage = "Refinement complete!"
-                    state.inferenceProgress = 1.0
+                // Build a filename -> category path lookup from LLM results
+                var llmFileToPaths: [String: [String]] = [:]
+                for node in llmTaxonomy.allCategories() {
+                    let nodePath = node.path  // Full path like ["Work", "Job Search", "Resumes"]
+                    for file in node.assignedFiles {
+                        llmFileToPaths[file.filename] = nodePath
+                    }
+                }
+                
+                NSLog("🧠 [WizardInfer] LLM suggested paths for \(llmFileToPaths.count) files")
+                
+                // Reassign files in Phase 1 taxonomy to LLM's suggested hierarchy paths
+                var reassignedCount = 0
+                for assignment in taxonomy.allAssignments() {
+                    if let newPath = llmFileToPaths[assignment.filename] {
+                        // Get the confidence from the LLM taxonomy for this path
+                        let llmConfidence = llmTaxonomy.find(path: newPath)?.confidence ?? 0.8
+                        
+                        taxonomy.reassignFile(
+                            fileId: assignment.fileId,
+                            toCategoryPath: newPath,
+                            confidence: max(assignment.confidence, llmConfidence)
+                        )
+                        reassignedCount += 1
+                    }
+                }
+                
+                let phase2Duration = Date().timeIntervalSince(phase2Start)
+                NSLog("✅ [WizardInfer] Phase 2 complete in %.2fs - reassigned \(reassignedCount) files to full hierarchies", phase2Duration)
+                
+                await MainActor.run {
+                    state.inferenceProgress = 0.7
+                    state.statusMessage = "Hierarchy inference complete! \(taxonomy.categoryCount) categories."
+                }
+                
+            } catch {
+                NSLog("⚠️ [WizardInfer] Phase 2 failed: \(error.localizedDescription) - continuing with Phase 1 results")
+                await MainActor.run {
+                    state.statusMessage = "AI hierarchy inference failed, using quick analysis results..."
                 }
             }
+        } else {
+            NSLog("⚠️ [WizardInfer] No LLM provider available for Phase 2 - skipping hierarchy inference")
         }
         
-        // Allow user to proceed immediately (don't wait for refinement)
+        await MainActor.run {
+            state.isRefining = false
+            state.inferenceProgress = 0.7
+        }
+        
+        // ========== PHASE 3: Deep Content Analysis (on ALL files) ==========
+        NSLog("🔬 [WizardInfer] ========== PHASE 3: DEEP CONTENT ANALYSIS ==========")
+        NSLog("🔬 [WizardInfer] Running deep analysis on ALL files for content-based categorization")
+        await startFullDeepAnalysis()
+        
+        // Allow user to proceed after all phases complete
         await MainActor.run {
             state.isProcessing = false
-            // Auto-advance to next step
-            NSLog("➡️ [WizardInfer] Phase 1 done - user can proceed while refinement continues")
+            state.inferenceProgress = 1.0
+            state.statusMessage = "All analysis complete!"
+            NSLog("➡️ [WizardInfer] All phases complete - advancing to next step")
             state.goNext()
-        }
-        
-        // ========== PHASE 3: Automatic Deep Analysis (if enabled) ==========
-        if state.enableDeepAnalysis {
-            NSLog("🔬 [WizardInfer] ========== AUTOMATIC DEEP ANALYSIS ==========")
-            NSLog("🔬 [WizardInfer] Deep analysis is ENABLED")
-            NSLog("🔬 [WizardInfer] Confidence threshold: \(Int(state.confidenceThreshold * 100))%%")
-            await startAutomaticDeepAnalysis()
-        } else {
-            NSLog("ℹ️ [WizardInfer] Deep analysis is DISABLED - skipping")
         }
     }
     
-    /// Automatically analyze low-confidence files in the background
-    private func startAutomaticDeepAnalysis() async {
+    /// Deep analyze ALL files using content extraction and LLM
+    private func startFullDeepAnalysis() async {
         let startTime = Date()
-        NSLog("🔬 [DeepAnalysis] Starting automatic deep analysis...")
+        NSLog("🔬 [DeepAnalysis] Starting FULL deep analysis on all files...")
         
         guard let taxonomy = state.taxonomy,
               let scanResult = state.scanResult else {
@@ -1130,50 +1185,32 @@ struct InferringStep: View {
             return
         }
         
-        // Find files below confidence threshold
-        let allAssignments = taxonomy.allAssignments()
-        NSLog("🔬 [DeepAnalysis] Total assignments in taxonomy: \(allAssignments.count)")
+        let allFiles = scanResult.files
+        NSLog("🔬 [DeepAnalysis] Will analyze ALL \(allFiles.count) files")
         
-        let lowConfFiles = allAssignments.filter { $0.confidence < state.confidenceThreshold }
-        
-        if lowConfFiles.isEmpty {
-            NSLog("✅ [DeepAnalysis] No low-confidence files found - all files above \(Int(state.confidenceThreshold * 100))%% confidence")
+        if allFiles.isEmpty {
+            NSLog("✅ [DeepAnalysis] No files to analyze")
             return
-        }
-        
-        NSLog("🔬 [DeepAnalysis] ========== FILES TO ANALYZE ==========")
-        NSLog("🔬 [DeepAnalysis] Found \(lowConfFiles.count) files below \(Int(state.confidenceThreshold * 100))%% confidence:")
-        for (index, file) in lowConfFiles.prefix(10).enumerated() {
-            NSLog("🔬 [DeepAnalysis]   \(index + 1). \(file.filename) (confidence: \(String(format: "%.0f", file.confidence * 100))%%)")
-        }
-        if lowConfFiles.count > 10 {
-            NSLog("🔬 [DeepAnalysis]   ... and \(lowConfFiles.count - 10) more")
         }
         
         await MainActor.run {
             state.isPerformingDeepAnalysis = true
-            state.statusMessage = "Deep analyzing \(lowConfFiles.count) low-confidence files..."
+            state.statusMessage = "Deep analyzing all \(allFiles.count) files..."
         }
         
         // Create deep analyzer with LLM provider
-        NSLog("🔬 [DeepAnalysis] Creating DeepAnalyzer with config:")
-        NSLog("🔬 [DeepAnalysis]   - maxConcurrent: 2")
-        NSLog("🔬 [DeepAnalysis]   - timeoutPerFile: 120s")
-        NSLog("🔬 [DeepAnalysis]   - extractAudio: true")
-        NSLog("🔬 [DeepAnalysis]   - performOCR: true")
-        
+        NSLog("🔬 [DeepAnalysis] Creating DeepAnalyzer...")
         let analyzerConfig = DeepAnalyzer.Configuration(
-            confidenceThreshold: state.confidenceThreshold,
+            confidenceThreshold: 0.0,  // Analyze ALL files regardless of confidence
             maxConcurrent: 2,
             timeoutPerFile: 120.0,
             extractAudio: true,
             performOCR: true,
             useHybridExtraction: true,
-            fullExtractionThreshold: 0.6
+            fullExtractionThreshold: 0.0  // Full extraction for all
         )
         
         // Get LLM provider from registry
-        NSLog("🔬 [DeepAnalysis] Getting LLM provider...")
         let ollamaProvider = await LLMProviderRegistry.shared.provider(id: "ollama")
         let defaultProv = await LLMProviderRegistry.shared.defaultProvider()
         guard let llmProvider = ollamaProvider ?? defaultProv else {
@@ -1187,24 +1224,18 @@ struct InferringStep: View {
         NSLog("🔬 [DeepAnalysis] Using LLM provider: \(llmProvider.identifier)")
         
         let deepAnalyzer = DeepAnalyzer(configuration: analyzerConfig, llmProvider: llmProvider)
-        
-        let existingCategories = taxonomy.allCategories().map { $0.name }
+        let existingCategories = taxonomy.allCategories().map { $0.pathString }
         NSLog("🔬 [DeepAnalysis] Existing categories: \(existingCategories.count)")
         
-        // Get scanned files for low-confidence assignments
-        let filesToAnalyze = lowConfFiles.compactMap { assignment -> TaxonomyScannedFile? in
-            scanResult.files.first { $0.filename == assignment.filename }
-        }
-        NSLog("🔬 [DeepAnalysis] Matched \(filesToAnalyze.count) files to analyze")
-        
         do {
-            NSLog("🔬 [DeepAnalysis] ========== STARTING BATCH ANALYSIS ==========")
+            NSLog("🔬 [DeepAnalysis] ========== STARTING FULL BATCH ANALYSIS ==========")
             let results = try await deepAnalyzer.analyzeFiles(
-                filesToAnalyze,
+                allFiles,
                 existingCategories: existingCategories
             ) { completed, total in
                 Task { @MainActor in
                     state.statusMessage = "Deep analyzing \(completed)/\(total)..."
+                    state.inferenceProgress = 0.7 + (Double(completed) / Double(total) * 0.3)
                 }
             }
             
@@ -1219,37 +1250,29 @@ struct InferringStep: View {
                 NSLog("🔬 [DeepAnalysis] Total time: \(String(format: "%.2f", duration))s")
                 NSLog("🔬 [DeepAnalysis] Results: \(results.count)")
                 
-                // Log results summary
-                for result in results.prefix(5) {
-                    NSLog("🔬 [DeepAnalysis] Result: \(result.filename) → \(result.pathString) (\(String(format: "%.0f", result.confidence * 100))%%)")
-                }
-                if results.count > 5 {
-                    NSLog("🔬 [DeepAnalysis] ... and \(results.count - 5) more results")
-                }
-                
-                // Apply results to taxonomy
-                var appliedCount = 0
+                // Apply results to taxonomy - reassign files to content-based categories
                 for result in results {
-                    if let file = lowConfFiles.first(where: { $0.filename == result.filename }) {
+                    if let file = scanResult.files.first(where: { $0.filename == result.filename }) {
                         taxonomy.reassignFile(
                             fileId: file.id,
                             toCategoryPath: result.categoryPath,
                             confidence: result.confidence
                         )
-                        appliedCount += 1
                     }
                 }
-                NSLog("🔬 [DeepAnalysis] Applied \(appliedCount) reassignments to taxonomy")
+                
+                NSLog("🔬 [DeepAnalysis] Applied \(results.count) deep analysis results to taxonomy")
             }
+            
         } catch {
-            let duration = Date().timeIntervalSince(startTime)
-            NSLog("❌ [DeepAnalysis] FAILED after \(String(format: "%.2f", duration))s: \(error.localizedDescription)")
+            NSLog("❌ [DeepAnalysis] Batch analysis failed: \(error.localizedDescription)")
             await MainActor.run {
                 state.isPerformingDeepAnalysis = false
                 state.statusMessage = "Deep analysis failed: \(error.localizedDescription)"
             }
         }
     }
+    
 }
 
 // MARK: - Phase Indicator
