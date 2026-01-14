@@ -107,8 +107,11 @@ actor GraphRAGExporter {
     
     // MARK: - Initialization
     
-    init(database: SortAIDatabase = .shared) {
-        self.database = database
+    init(database: SortAIDatabase? = nil) throws {
+        guard let db = database ?? SortAIDatabase.sharedOrNil else {
+            throw DatabaseError.notInitialized
+        }
+        self.database = db
         
         self.encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601

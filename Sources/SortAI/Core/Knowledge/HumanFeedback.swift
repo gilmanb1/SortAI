@@ -108,7 +108,11 @@ final class FeedbackManager: FeedbackManaging, @unchecked Sendable {
     /// Initialize with unified SortAIDatabase
     init(knowledgeGraph: KnowledgeGraphStore, database: SortAIDatabase? = nil) async throws {
         self.knowledgeGraph = knowledgeGraph
-        self.database = database ?? SortAIDatabase.shared
+        if let db = database {
+            self.database = db
+        } else {
+            self.database = try SortAIDatabase.shared
+        }
         self.feedbackRepository = self.database.feedback
     }
     

@@ -165,7 +165,11 @@ final class KnowledgeGraphStore: KnowledgeGraphing, @unchecked Sendable {
     
     /// Initialize with the shared SortAIDatabase
     init(database: SortAIDatabase? = nil) throws {
-        self.database = database ?? SortAIDatabase.shared
+        if let db = database {
+            self.database = db
+        } else {
+            self.database = try SortAIDatabase.shared
+        }
         self.entityRepository = self.database.entities
         self.relationshipRepository = RelationshipRepository(database: self.database)
     }

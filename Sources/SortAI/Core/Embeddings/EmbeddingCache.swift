@@ -144,7 +144,7 @@ actor EmbeddingCache {
     
     // MARK: - Properties
     
-    private let database: SortAIDatabase
+    private let database: SortAIDatabase?
     private let config: Configuration
     
     // In-memory LRU cache for hot entries
@@ -159,8 +159,21 @@ actor EmbeddingCache {
     // MARK: - Initialization
     
     init(database: SortAIDatabase? = nil, configuration: Configuration = .default) {
-        self.database = database ?? SortAIDatabase.shared
+        self.database = database ?? SortAIDatabase.sharedOrNil
         self.config = configuration
+    }
+    
+    /// Whether persistence is available
+    private var hasPersistence: Bool {
+        database != nil
+    }
+    
+    /// Gets the database, throwing if unavailable
+    private func requireDatabase() throws -> SortAIDatabase {
+        guard let db = database else {
+            throw DatabaseError.notInitialized
+        }
+        return db
     }
     
     // MARK: - Cache Operations
@@ -308,31 +321,31 @@ actor EmbeddingCache {
     // MARK: - Database Operations
     
     private func fetchFromDatabase(id: String) throws -> CachedEmbedding? {
-        try database.dbQueue.read { db in
+        try requireDatabase().dbQueue.read { db in
             try CachedEmbedding.filter(CachedEmbedding.Columns.id == id).fetchOne(db)
         }
     }
     
     private func saveToDatabase(_ cached: CachedEmbedding) throws {
-        try database.dbQueue.write { db in
+        try requireDatabase().dbQueue.write { db in
             try cached.save(db)
         }
     }
     
     private func deleteFromDatabase(id: String) throws {
-        try database.dbQueue.write { db in
+        try requireDatabase().dbQueue.write { db in
             _ = try CachedEmbedding.filter(CachedEmbedding.Columns.id == id).deleteAll(db)
         }
     }
     
     private func clearDatabase() throws {
-        try database.dbQueue.write { db in
+        try requireDatabase().dbQueue.write { db in
             _ = try CachedEmbedding.deleteAll(db)
         }
     }
     
     private func updateAccessStats(id: String) throws {
-        try database.dbQueue.write { db in
+        try requireDatabase().dbQueue.write { db in
             try db.execute(
                 sql: """
                     UPDATE embedding_cache 
@@ -345,19 +358,19 @@ actor EmbeddingCache {
     }
     
     private func cacheCount() throws -> Int {
-        try database.dbQueue.read { db in
+        try requireDatabase().dbQueue.read { db in
             try CachedEmbedding.fetchCount(db)
         }
     }
     
     private func getAllIds() throws -> [String] {
-        try database.dbQueue.read { db in
+        try requireDatabase().dbQueue.read { db in
             try String.fetchAll(db, sql: "SELECT id FROM embedding_cache")
         }
     }
     
     private func pruneExpired(before date: Date) throws {
-        try database.dbQueue.write { db in
+        try requireDatabase().dbQueue.write { db in
             _ = try CachedEmbedding
                 .filter(CachedEmbedding.Columns.lastAccessedAt < date)
                 .deleteAll(db)
@@ -365,7 +378,7 @@ actor EmbeddingCache {
     }
     
     private func pruneLRU(count: Int) throws {
-        try database.dbQueue.write { db in
+        try requireDatabase().dbQueue.write { db in
             try db.execute(
                 sql: """
                     DELETE FROM embedding_cache 
@@ -388,7 +401,7 @@ actor EmbeddingCache {
         excludingModel targetModel: String = "apple-nl-embedding",
         limit: Int = 100
     ) throws -> [CachedEmbedding] {
-        try database.dbQueue.read { db in
+        try requireDatabase().dbQueue.read { db in
             try CachedEmbedding
                 .filter(CachedEmbedding.Columns.model != targetModel)
                 .order(CachedEmbedding.Columns.hitCount.desc)  // Prioritize frequently used
@@ -399,7 +412,7 @@ actor EmbeddingCache {
     
     /// Count embeddings that need re-embedding
     func countEmbeddingsNeedingReembedding(excludingModel targetModel: String = "apple-nl-embedding") throws -> Int {
-        try database.dbQueue.read { db in
+        try requireDatabase().dbQueue.read { db in
             try CachedEmbedding
                 .filter(CachedEmbedding.Columns.model != targetModel)
                 .fetchCount(db)
@@ -413,7 +426,7 @@ actor EmbeddingCache {
         model: String,
         type: CachedEmbedding.EmbeddingType
     ) throws {
-        try database.dbQueue.write { db in
+        try requireDatabase().dbQueue.write { db in
             try db.execute(
                 sql: """
                     UPDATE embedding_cache 
@@ -444,14 +457,14 @@ actor EmbeddingCache {
     
     /// Get all unique models used in the cache
     func getUniqueModels() throws -> [String] {
-        try database.dbQueue.read { db in
+        try requireDatabase().dbQueue.read { db in
             try String.fetchAll(db, sql: "SELECT DISTINCT model FROM embedding_cache ORDER BY model")
         }
     }
     
     /// Get statistics by model
     func statisticsByModel() throws -> [(model: String, count: Int, avgHitCount: Double)] {
-        try database.dbQueue.read { db in
+        try requireDatabase().dbQueue.read { db in
             let rows = try Row.fetchAll(db, sql: """
                 SELECT model, COUNT(*) as count, AVG(hitCount) as avgHits
                 FROM embedding_cache

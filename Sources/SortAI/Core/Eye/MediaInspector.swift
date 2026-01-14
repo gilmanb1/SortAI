@@ -10,43 +10,148 @@ import PDFKit
 import NaturalLanguage
 import CoreImage
 
-// MARK: - Continuation State Helper
+// MARK: - Speech Recognition Actor
 
-/// Thread-safe state container for managing continuation resumption
-/// Uses @unchecked Sendable with explicit synchronization via NSLock
-private final class SpeechContinuationState: @unchecked Sendable {
-    nonisolated(unsafe) private var hasResumed = false
-    private let lock = NSLock()
-    nonisolated(unsafe) private var storedContinuation: CheckedContinuation<String, Error>?
+/// Actor that handles speech recognition with proper structured concurrency
+/// Ensures thread-safe access to recognition state and proper cancellation
+private actor SpeechRecognitionWorker {
+    private var currentTask: SFSpeechRecognitionTask?
+    private var isCompleted = false
     
-    func setContinuation(_ continuation: CheckedContinuation<String, Error>) {
-        lock.lock()
-        defer { lock.unlock() }
-        storedContinuation = continuation
+    enum RecognitionResult {
+        case success(String)
+        case error(Error)
+        case timeout
+        case noSpeech
     }
     
-    func resumeWithSuccess(_ value: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !hasResumed, let continuation = storedContinuation else { return }
-        hasResumed = true
-        continuation.resume(returning: value)
+    /// Performs speech recognition with proper cancellation handling
+    func recognize(url: URL, timeout: TimeInterval = 30.0) async throws -> String {
+        // Reset state
+        isCompleted = false
+        currentTask = nil
+        
+        guard let recognizer = SFSpeechRecognizer() else {
+            throw InspectorError.speechRecognitionUnavailable
+        }
+        
+        guard recognizer.isAvailable else {
+            throw InspectorError.speechRecognitionUnavailable
+        }
+        
+        let request = SFSpeechURLRecognitionRequest(url: url)
+        request.shouldReportPartialResults = false
+        request.addsPunctuation = true
+        
+        // Use async stream for structured result handling
+        return try await withThrowingTaskGroup(of: RecognitionResult.self) { group in
+            // Recognition task
+            group.addTask {
+                try await self.performRecognition(recognizer: recognizer, request: request, url: url)
+            }
+            
+            // Timeout task
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                return .timeout
+            }
+            
+            // Wait for first result
+            guard let result = try await group.next() else {
+                throw InspectorError.extractionFailed("Recognition failed to produce result")
+            }
+            
+            // Cancel remaining tasks
+            group.cancelAll()
+            
+            // Also cancel the speech task if still running
+            self.cancelCurrentTask()
+            
+            switch result {
+            case .success(let transcript):
+                return transcript
+            case .error(let error):
+                throw error
+            case .timeout:
+                NSLog("⚠️ [Speech] Recognition timed out after \(timeout)s for \(url.lastPathComponent)")
+                throw InspectorError.extractionFailed("Speech recognition timed out")
+            case .noSpeech:
+                return ""
+            }
+        }
     }
     
-    func resumeWithFailure(_ error: Error) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !hasResumed, let continuation = storedContinuation else { return }
-        hasResumed = true
-        continuation.resume(throwing: error)
+    private func performRecognition(
+        recognizer: SFSpeechRecognizer,
+        request: SFSpeechURLRecognitionRequest,
+        url: URL
+    ) async throws -> RecognitionResult {
+        try await withCheckedThrowingContinuation { [weak self] continuation in
+            // Use a class to capture mutable state safely
+            let resumed = UnsafeMutablePointer<Bool>.allocate(capacity: 1)
+            resumed.initialize(to: false)
+            
+            let task = recognizer.recognitionTask(with: request) { result, error in
+                // Ensure we only resume once
+                guard !resumed.pointee else { return }
+                
+                if let error = error {
+                    resumed.pointee = true
+                    resumed.deallocate()
+                    
+                    let nsError = error as NSError
+                    // Handle common non-error conditions
+                    if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1110 {
+                        NSLog("ℹ️ [Speech] No speech detected for \(url.lastPathComponent)")
+                        continuation.resume(returning: .noSpeech)
+                        return
+                    }
+                    if nsError.domain == AVFoundationErrorDomain && nsError.code == -11800 {
+                        NSLog("ℹ️ [Speech] AVFoundation completion for \(url.lastPathComponent)")
+                        continuation.resume(returning: .noSpeech)
+                        return
+                    }
+                    if nsError.domain == "kLSRErrorDomain" && nsError.code == 301 {
+                        NSLog("ℹ️ [Speech] Recognition cancelled for \(url.lastPathComponent)")
+                        continuation.resume(returning: .noSpeech)
+                        return
+                    }
+                    
+                    NSLog("⚠️ [Speech] Recognition error for \(url.lastPathComponent): \(nsError.localizedDescription)")
+                    continuation.resume(returning: .error(InspectorError.extractionFailed(error.localizedDescription)))
+                    return
+                }
+                
+                guard let result = result, result.isFinal else {
+                    return // Wait for final result
+                }
+                
+                resumed.pointee = true
+                resumed.deallocate()
+                continuation.resume(returning: .success(result.bestTranscription.formattedString))
+            }
+            
+            // Store task for potential cancellation
+            Task { [weak self] in
+                await self?.setCurrentTask(task)
+            }
+        }
     }
     
-    var didResume: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return hasResumed
+    private func setCurrentTask(_ task: SFSpeechRecognitionTask) {
+        currentTask = task
+    }
+    
+    func cancelCurrentTask() {
+        if let task = currentTask, task.state == .running {
+            task.cancel()
+        }
+        currentTask = nil
     }
 }
+
+/// Global speech recognition worker for thread-safe access
+private let speechWorker = SpeechRecognitionWorker()
 
 // MARK: - Inspector Errors
 enum InspectorError: LocalizedError {
@@ -838,23 +943,10 @@ actor MediaInspector: MediaInspecting {
         return ""
     }
     
-    /// Transcribe audio file with timeout wrapper
+    /// Transcribe audio file with configurable timeout
     private func transcribeAudioFileWithTimeout(url: URL, timeout: TimeInterval) async throws -> String {
-        return try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask {
-                try await self.transcribeAudioFile(url: url)
-            }
-            
-            group.addTask {
-                try await Task.sleep(for: .seconds(timeout))
-                throw InspectorError.extractionFailed("Speech recognition timed out after \(Int(timeout))s")
-            }
-            
-            // Return first completed result
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
-        }
+        // Delegate directly to speech worker with the specified timeout
+        try await speechWorker.recognize(url: url, timeout: timeout)
     }
     
     /// Transcribes only the first N seconds of audio for speed (fallback method)
@@ -1210,65 +1302,10 @@ actor MediaInspector: MediaInspecting {
         }
     }
     
-    /// Transcribes audio file using SFSpeechRecognizer
+    /// Transcribes audio file using SFSpeechRecognizer with structured concurrency
     private func transcribeAudioFile(url: URL) async throws -> String {
-        guard let recognizer = SFSpeechRecognizer() else {
-            throw InspectorError.speechRecognitionUnavailable
-        }
-        
-        guard recognizer.isAvailable else {
-            throw InspectorError.speechRecognitionUnavailable
-        }
-        
-        let request = SFSpeechURLRecognitionRequest(url: url)
-        request.shouldReportPartialResults = false
-        request.addsPunctuation = true
-        
-        // Use thread-safe state box for continuation management
-        let stateBox = SpeechContinuationState()
-        
-        return try await withCheckedThrowingContinuation { continuation in
-            stateBox.setContinuation(continuation)
-            
-            let task = recognizer.recognitionTask(with: request) { result, error in
-                if let error = error {
-                    let nsError = error as NSError
-                    if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1110 {
-                        NSLog("ℹ️ [Speech] No speech detected for \(url.lastPathComponent) (code: \(nsError.code))")
-                        stateBox.resumeWithSuccess("")
-                        return
-                    }
-                    if nsError.domain == AVFoundationErrorDomain && nsError.code == -11800 {
-                        NSLog("ℹ️ [Speech] AVFoundation completion error for \(url.lastPathComponent) (code: \(nsError.code))")
-                        stateBox.resumeWithSuccess("")
-                        return
-                    }
-                    if nsError.domain == "kLSRErrorDomain" && nsError.code == 301 {
-                        NSLog("ℹ️ [Speech] Speech request cancelled for \(url.lastPathComponent) (code: \(nsError.code))")
-                        stateBox.resumeWithSuccess("")
-                        return
-                    }
-                    NSLog("⚠️ [Speech] Recognition error for \(url.lastPathComponent): \(nsError.localizedDescription) (domain: \(nsError.domain), code: \(nsError.code))")
-                    stateBox.resumeWithFailure(InspectorError.extractionFailed(error.localizedDescription))
-                    return
-                }
-                
-                guard let result = result, result.isFinal else {
-                    return // Wait for final result
-                }
-                
-                stateBox.resumeWithSuccess(result.bestTranscription.formattedString)
-            }
-            
-            // Set a timeout to prevent hanging indefinitely
-            DispatchQueue.global().asyncAfter(deadline: .now() + 30) {
-                if !stateBox.didResume {
-                    task.cancel()
-                    NSLog("⚠️ [Speech] Recognition timed out after 30s for \(url.lastPathComponent)")
-                    stateBox.resumeWithFailure(InspectorError.extractionFailed("Speech recognition timed out"))
-                }
-            }
-        }
+        // Use the actor-based speech worker for proper thread safety
+        try await speechWorker.recognize(url: url, timeout: 30.0)
     }
     
     // MARK: - Document Extraction Helpers

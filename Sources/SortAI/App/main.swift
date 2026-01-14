@@ -115,7 +115,7 @@ struct CommandLineHandler {
         var sizeDesc = "unknown"
         
         do {
-            let database = SortAIDatabase.shared
+            let database = try SortAIDatabase.shared
             
             switch type {
             case .patterns:
@@ -185,7 +185,7 @@ struct CommandLineHandler {
         var success = true
         
         do {
-            let database = SortAIDatabase.shared
+            let database = try SortAIDatabase.shared
             
             for cacheType in typesToClear {
                 switch cacheType {

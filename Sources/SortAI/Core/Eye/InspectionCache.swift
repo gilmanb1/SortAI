@@ -77,7 +77,7 @@ actor InspectionCache {
     
     // MARK: - Properties
     
-    private let database: SortAIDatabase
+    private let database: SortAIDatabase?
     private let config: Configuration
     
     // In-memory LRU cache for hot entries
@@ -92,8 +92,21 @@ actor InspectionCache {
     // MARK: - Initialization
     
     init(database: SortAIDatabase? = nil, configuration: Configuration = .default) {
-        self.database = database ?? SortAIDatabase.shared
+        self.database = database ?? SortAIDatabase.sharedOrNil
         self.config = configuration
+    }
+    
+    /// Whether persistence is available
+    private var hasPersistence: Bool {
+        database != nil
+    }
+    
+    /// Gets the database, throwing if unavailable
+    private func requireDatabase() throws -> SortAIDatabase {
+        guard let db = database else {
+            throw DatabaseError.notInitialized
+        }
+        return db
     }
     
     // MARK: - Cache Lookup
@@ -180,21 +193,21 @@ actor InspectionCache {
             accessOrder.removeAll { $0 == pathKey.hash }
         }
         
-        try database.write { db in
+        try requireDatabase().write { db in
             try db.execute(sql: "DELETE FROM inspection_cache WHERE path = ?", arguments: [url.path])
         }
     }
     
     /// Invalidate all entries for files that no longer exist
     func pruneNonexistent() async throws {
-        let entries = try database.read { db in
+        let entries = try requireDatabase().read { db in
             try CachedInspection.fetchAll(db)
         }
         
         var deletedCount = 0
         for entry in entries {
             if !FileManager.default.fileExists(atPath: entry.path) {
-                try database.write { db in
+                try requireDatabase().write { db in
                     try db.execute(sql: "DELETE FROM inspection_cache WHERE id = ?", arguments: [entry.id])
                 }
                 memoryCache.removeValue(forKey: entry.id)
@@ -231,7 +244,7 @@ actor InspectionCache {
     // MARK: - Private Helpers
     
     private func fetchByPath(path: String, mtime: Date) throws -> CachedInspection? {
-        try database.read { db in
+        try requireDatabase().read { db in
             try CachedInspection
                 .filter(Column("path") == path)
                 .filter(Column("modificationTime") == mtime)
@@ -240,7 +253,7 @@ actor InspectionCache {
     }
     
     private func fetchByChecksum(checksum: String) throws -> CachedInspection? {
-        try database.read { db in
+        try requireDatabase().read { db in
             try CachedInspection
                 .filter(Column("checksum") == checksum)
                 .order(Column("lastAccessedAt").desc)
@@ -249,13 +262,13 @@ actor InspectionCache {
     }
     
     private func saveToDatabase(_ cached: CachedInspection) throws {
-        try database.write { db in
+        try requireDatabase().write { db in
             try cached.save(db)
         }
     }
     
     private func updateAccessStats(id: String) throws {
-        try database.write { db in
+        try requireDatabase().write { db in
             try db.execute(sql: """
                 UPDATE inspection_cache 
                 SET lastAccessedAt = ?, hitCount = hitCount + 1
@@ -265,7 +278,7 @@ actor InspectionCache {
     }
     
     private func cacheCount() throws -> Int {
-        try database.read { db in
+        try requireDatabase().read { db in
             try CachedInspection.fetchCount(db)
         }
     }
@@ -274,7 +287,7 @@ actor InspectionCache {
         // Remove oldest entries beyond max size
         let cutoff = Date().addingTimeInterval(-Double(config.ttlDays) * 24 * 60 * 60)
         
-        try database.write { db in
+        try requireDatabase().write { db in
             // First, delete expired entries
             try db.execute(sql: "DELETE FROM inspection_cache WHERE lastAccessedAt < ?", arguments: [cutoff])
             

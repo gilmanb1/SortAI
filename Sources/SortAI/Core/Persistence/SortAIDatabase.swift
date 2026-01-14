@@ -9,15 +9,20 @@ import GRDB
 
 enum DatabaseError: LocalizedError {
     case notInitialized
+    case initializationFailed(underlying: Error)
     case migrationFailed(String)
     case transactionFailed(String)
     case recordNotFound(String)
     case invalidData(String)
+    case readOnlyMode
+    case recoveryInProgress
     
     var errorDescription: String? {
         switch self {
         case .notInitialized:
             return "Database not initialized"
+        case .initializationFailed(let error):
+            return "Database initialization failed: \(error.localizedDescription)"
         case .migrationFailed(let reason):
             return "Migration failed: \(reason)"
         case .transactionFailed(let reason):
@@ -26,6 +31,10 @@ enum DatabaseError: LocalizedError {
             return "Record not found: \(identifier)"
         case .invalidData(let reason):
             return "Invalid data: \(reason)"
+        case .readOnlyMode:
+            return "Database is in read-only mode due to recovery failure"
+        case .recoveryInProgress:
+            return "Database recovery is in progress"
         }
     }
 }
@@ -72,20 +81,84 @@ final class SortAIDatabase: @unchecked Sendable {
     
     // Using nonisolated(unsafe) because access is protected by NSLock
     nonisolated(unsafe) private static var _shared: SortAIDatabase?
+    nonisolated(unsafe) private static var _state: DatabaseState = .healthy
+    nonisolated(unsafe) private static var _lastError: Error?
+    nonisolated(unsafe) private static var _recoveryService: DatabaseRecoveryService?
     private static let lock = NSLock()
     
-    static var shared: SortAIDatabase {
+    /// Current database state (thread-safe read)
+    static var state: DatabaseState {
+        lock.lock()
+        defer { lock.unlock() }
+        return _state
+    }
+    
+    /// Last initialization error (thread-safe read)
+    static var lastError: Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _lastError
+    }
+    
+    /// Shared database instance with graceful error handling
+    /// Returns nil if database is unavailable; check `state` for details
+    static var sharedOrNil: SortAIDatabase? {
         lock.lock()
         defer { lock.unlock() }
         
-        if _shared == nil {
+        if _shared == nil && _state == .healthy {
             do {
                 _shared = try SortAIDatabase(configuration: .default)
+                _state = .healthy
+                _lastError = nil
             } catch {
-                fatalError("Failed to initialize SortAI database: \(error)")
+                _lastError = error
+                _state = .unavailable(reason: error.localizedDescription)
+                NSLog("❌ [SortAIDatabase] Initialization failed: \(error.localizedDescription)")
+                // Don't fatalError - return nil and let caller handle
             }
         }
-        return _shared!
+        return _shared
+    }
+    
+    /// Shared database instance (throws if unavailable)
+    /// Prefer `sharedOrNil` for graceful handling
+    static var shared: SortAIDatabase {
+        get throws {
+            guard let db = sharedOrNil else {
+                throw DatabaseError.initializationFailed(underlying: _lastError ?? DatabaseError.notInitialized)
+            }
+            return db
+        }
+    }
+    
+    /// Legacy accessor for backward compatibility
+    /// ⚠️ DEPRECATED: Use `sharedOrNil` or `try shared` instead
+    /// This will return the database if available, otherwise crash with helpful message
+    @available(*, deprecated, message: "Use sharedOrNil or try shared instead")
+    static var sharedLegacy: SortAIDatabase {
+        // Try to get existing database
+        if let db = sharedOrNil {
+            return db
+        }
+        
+        // Crash with helpful message (same as old fatalError behavior but more info)
+        fatalError("""
+            ❌ SortAI Database Initialization Failed
+            
+            The database could not be initialized.
+            State: \(_state)
+            Error: \(_lastError?.localizedDescription ?? "Unknown")
+            
+            Please check:
+            1. Disk space availability
+            2. Write permissions to ~/Library/Application Support/SortAI/
+            3. Database file integrity
+            
+            To fix:
+            - Use `SortAIDatabase.initializeAsync()` at app startup for automatic recovery
+            - Or delete ~/Library/Application Support/SortAI/sortai.sqlite to reset
+            """)
     }
     
     /// Resets the shared instance (useful for testing)
@@ -93,6 +166,80 @@ final class SortAIDatabase: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         _shared = nil
+        _state = .healthy
+        _lastError = nil
+        _recoveryService = nil
+    }
+    
+    /// Initializes the database with automatic recovery support
+    /// Call this at app startup instead of accessing `shared` directly
+    static func initializeAsync() async -> (database: SortAIDatabase?, state: DatabaseState) {
+        // Check if already initialized (sync helper)
+        if let existing = getExistingIfInitialized() {
+            return existing
+        }
+        
+        // Attempt initialization with recovery
+        let service = DatabaseRecoveryService()
+        let result = await service.initializeWithRecovery()
+        
+        // Store result (sync helper)
+        storeInitializationResult(
+            database: result.database,
+            state: result.finalState,
+            success: result.success,
+            service: service
+        )
+        
+        if result.dataLost {
+            NSLog("⚠️ [SortAIDatabase] Recovery succeeded but some data was lost")
+            // Post notification for UI to show warning
+            await MainActor.run {
+                NotificationCenter.default.post(
+                    name: .databaseRecoveryDataLost,
+                    object: nil,
+                    userInfo: ["message": result.message]
+                )
+            }
+        }
+        
+        return (result.database, result.finalState)
+    }
+    
+    /// Helper for async initialization - checks if already initialized (sync, not async)
+    private static func getExistingIfInitialized() -> (database: SortAIDatabase?, state: DatabaseState)? {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        if let existing = _shared {
+            return (existing, _state)
+        }
+        return nil
+    }
+    
+    /// Helper for async initialization - stores result (sync, not async)
+    private static func storeInitializationResult(
+        database: SortAIDatabase?,
+        state: DatabaseState,
+        success: Bool,
+        service: DatabaseRecoveryService
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        _shared = database
+        _state = state
+        _lastError = success ? nil : DatabaseError.initializationFailed(underlying: DatabaseError.notInitialized)
+        _recoveryService = service
+    }
+    
+    /// Creates a backup of the current database
+    static func createBackup() async throws -> URL {
+        guard let service = _recoveryService else {
+            let newService = DatabaseRecoveryService()
+            return try await newService.createBackup()
+        }
+        return try await service.createBackup()
     }
     
     // MARK: - Properties
@@ -188,10 +335,12 @@ final class SortAIDatabase: @unchecked Sendable {
     // MARK: - Default Path
     
     private static func defaultDatabasePath() throws -> String {
-        let appSupport = FileManager.default.urls(
+        guard let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first!
+        ).first else {
+            throw DatabaseError.notInitialized
+        }
         
         let sortAIDir = appSupport.appendingPathComponent("SortAI", isDirectory: true)
         try FileManager.default.createDirectory(at: sortAIDir, withIntermediateDirectories: true)
@@ -534,4 +683,20 @@ struct DatabaseStatistics: Sendable, Equatable {
     var totalRecords: Int {
         entityCount + relationshipCount + patternCount + recordCount + feedbackCount
     }
+}
+
+// MARK: - Database Notifications
+
+extension Notification.Name {
+    /// Posted when database recovery resulted in data loss
+    static let databaseRecoveryDataLost = Notification.Name("SortAI.databaseRecoveryDataLost")
+    
+    /// Posted when database state changes
+    static let databaseStateChanged = Notification.Name("SortAI.databaseStateChanged")
+    
+    /// Posted when database recovery starts
+    static let databaseRecoveryStarted = Notification.Name("SortAI.databaseRecoveryStarted")
+    
+    /// Posted when database recovery completes
+    static let databaseRecoveryCompleted = Notification.Name("SortAI.databaseRecoveryCompleted")
 }

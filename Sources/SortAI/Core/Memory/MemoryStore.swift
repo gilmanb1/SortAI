@@ -56,7 +56,11 @@ final class MemoryStore: PatternMatching, Sendable {
         embeddingDimensions: Int = 384,
         similarityThreshold: Double = 0.85
     ) throws {
-        self.database = database ?? SortAIDatabase.shared
+        if let db = database {
+            self.database = db
+        } else {
+            self.database = try SortAIDatabase.shared
+        }
         self.embeddingDimensions = embeddingDimensions
         self.similarityThreshold = similarityThreshold
         self.patternRepository = PatternRepository(

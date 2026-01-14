@@ -146,7 +146,7 @@ actor PrototypeStore {
     
     // MARK: - Properties
     
-    private let database: SortAIDatabase
+    private let database: SortAIDatabase?
     private let config: Configuration
     
     // In-memory cache
@@ -156,8 +156,21 @@ actor PrototypeStore {
     // MARK: - Initialization
     
     init(database: SortAIDatabase? = nil, configuration: Configuration = .default) {
-        self.database = database ?? SortAIDatabase.shared
+        self.database = database ?? SortAIDatabase.sharedOrNil
         self.config = configuration
+    }
+    
+    /// Whether persistence is available
+    private var hasPersistence: Bool {
+        database != nil
+    }
+    
+    /// Gets the database, throwing if unavailable
+    private func requireDatabase() throws -> SortAIDatabase {
+        guard let db = database else {
+            throw DatabaseError.notInitialized
+        }
+        return db
     }
     
     // MARK: - Prototype Operations
@@ -420,21 +433,24 @@ actor PrototypeStore {
     // MARK: - Database Operations
     
     private func loadAllPrototypes() throws -> [CategoryPrototype] {
-        try database.dbQueue.read { db in
+        guard hasPersistence else { return [] }
+        return try requireDatabase().dbQueue.read { db in
             try CategoryPrototype.fetchAll(db)
         }
     }
     
     private func savePrototype(_ prototype: CategoryPrototype) throws {
-        try database.dbQueue.write { db in
+        guard hasPersistence else { return }
+        try requireDatabase().dbQueue.write { db in
             try prototype.save(db)
         }
     }
     
     private func saveAllPrototypes() throws {
+        guard hasPersistence else { return }
         // Capture prototypes locally to avoid actor isolation issues
         let prototypes = Array(prototypeCache.values)
-        try database.dbQueue.write { db in
+        try requireDatabase().dbQueue.write { db in
             for prototype in prototypes {
                 try prototype.save(db)
             }
@@ -442,7 +458,8 @@ actor PrototypeStore {
     }
     
     private func deleteFromDatabase(id: String) throws {
-        try database.dbQueue.write { db in
+        guard hasPersistence else { return }
+        try requireDatabase().dbQueue.write { db in
             _ = try CategoryPrototype.filter(CategoryPrototype.Columns.id == id).deleteAll(db)
         }
     }

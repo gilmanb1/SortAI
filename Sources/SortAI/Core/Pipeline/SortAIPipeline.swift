@@ -232,7 +232,12 @@ actor SortAIPipeline: FileProcessing {
         
         // Step 2: Quick exact match check (fast - just DB lookup)
         if let existingPattern = try? memoryStore.findByChecksum(signature.checksum) {
-            try? memoryStore.recordHit(patternId: existingPattern.id)
+            // Record hit (non-critical - log failures)
+            do {
+                try memoryStore.recordHit(patternId: existingPattern.id)
+            } catch {
+                NSLog("⚠️ [Pipeline] Failed to record memory hit: \(error.localizedDescription)")
+            }
             memoryHitCount += 1
             
             // Parse the stored label back into a CategoryPath
@@ -263,7 +268,12 @@ actor SortAIPipeline: FileProcessing {
         
         // Use memory if it has a high-confidence match
         if let match = memoryMatch, match.1 >= config.memorySimilarityThreshold {
-            try? memoryStore.recordHit(patternId: match.0.id)
+            // Record hit (non-critical - log failures)
+            do {
+                try memoryStore.recordHit(patternId: match.0.id)
+            } catch {
+                NSLog("⚠️ [Pipeline] Failed to record memory hit (similarity): \(error.localizedDescription)")
+            }
             memoryHitCount += 1
             
             // Parse the stored label back into a CategoryPath
@@ -282,15 +292,19 @@ actor SortAIPipeline: FileProcessing {
                 wasFromMemory: true
             )
             
-            // Add to feedback queue for tracking even if auto-accepted
-            _ = try? await feedbackManager?.addToQueue(
-                fileURL: url,
-                category: result.brainResult.category,
-                subcategories: result.brainResult.allSubcategories,  // Use ALL subcategories
-                confidence: result.brainResult.confidence,
-                rationale: result.brainResult.rationale.isEmpty ? "From memory" : result.brainResult.rationale,
-                keywords: result.brainResult.tags
-            )
+            // Add to feedback queue for tracking (non-critical - log failures)
+            do {
+                _ = try await feedbackManager?.addToQueue(
+                    fileURL: url,
+                    category: result.brainResult.category,
+                    subcategories: result.brainResult.allSubcategories,
+                    confidence: result.brainResult.confidence,
+                    rationale: result.brainResult.rationale.isEmpty ? "From memory" : result.brainResult.rationale,
+                    keywords: result.brainResult.tags
+                )
+            } catch {
+                NSLog("⚠️ [Pipeline] Failed to add memory match to feedback queue: \(error.localizedDescription)")
+            }
             
             return result
         }
@@ -302,15 +316,19 @@ actor SortAIPipeline: FileProcessing {
             wasFromMemory: false
         )
         
-        // Add to feedback queue (this handles learning and auto-acceptance internally)
-        _ = try? await feedbackManager?.addToQueue(
-            fileURL: url,
-            category: brainResult.category,
-            subcategories: brainResult.allSubcategories,  // Use ALL subcategories
-            confidence: brainResult.confidence,
-            rationale: brainResult.rationale.isEmpty ? "From LLM" : brainResult.rationale,
-            keywords: brainResult.tags
-        )
+        // Add to feedback queue (handles learning and auto-acceptance internally, log failures)
+        do {
+            _ = try await feedbackManager?.addToQueue(
+                fileURL: url,
+                category: brainResult.category,
+                subcategories: brainResult.allSubcategories,
+                confidence: brainResult.confidence,
+                rationale: brainResult.rationale.isEmpty ? "From LLM" : brainResult.rationale,
+                keywords: brainResult.tags
+            )
+        } catch {
+            NSLog("⚠️ [Pipeline] Failed to add brain result to feedback queue: \(error.localizedDescription)")
+        }
         
         // Save to memory record
         // Save processing record (only if concrete MemoryStore available)
