@@ -28,12 +28,59 @@ actor FilenameScanner {
         /// Minimum file size (bytes) - skip tiny files
         let minFileSize: Int64
         
+        // MARK: - Hierarchy Settings
+        
+        /// Whether to respect folder hierarchy (treat sub-folders as units)
+        let respectHierarchy: Bool
+        
+        /// Minimum depth to treat as folder unit (1 = immediate children of scan root)
+        let minDepthForFolder: Int
+        
+        /// Minimum files in a folder to treat it as a unit (folders with fewer files become loose)
+        let minFilesForFolder: Int
+        
+        /// Full initializer with all parameters
+        init(
+            maxFiles: Int,
+            includeHidden: Bool,
+            excludedExtensions: Set<String>,
+            excludedDirectories: Set<String>,
+            minFileSize: Int64,
+            respectHierarchy: Bool = true,
+            minDepthForFolder: Int = 1,
+            minFilesForFolder: Int = 1
+        ) {
+            self.maxFiles = maxFiles
+            self.includeHidden = includeHidden
+            self.excludedExtensions = excludedExtensions
+            self.excludedDirectories = excludedDirectories
+            self.minFileSize = minFileSize
+            self.respectHierarchy = respectHierarchy
+            self.minDepthForFolder = minDepthForFolder
+            self.minFilesForFolder = minFilesForFolder
+        }
+        
         static let `default` = Configuration(
             maxFiles: 10000,
             includeHidden: false,
             excludedExtensions: [".ds_store", ".localized", ".gitignore", ".gitattributes"],
             excludedDirectories: ["node_modules", ".git", ".svn", "__pycache__", ".cache", "build", "dist"],
-            minFileSize: 100  // Skip files smaller than 100 bytes
+            minFileSize: 100,  // Skip files smaller than 100 bytes
+            respectHierarchy: true,
+            minDepthForFolder: 1,
+            minFilesForFolder: 1
+        )
+        
+        /// Configuration for flat scanning (legacy behavior)
+        static let flat = Configuration(
+            maxFiles: 10000,
+            includeHidden: false,
+            excludedExtensions: [".ds_store", ".localized", ".gitignore", ".gitattributes"],
+            excludedDirectories: ["node_modules", ".git", ".svn", "__pycache__", ".cache", "build", "dist"],
+            minFileSize: 100,
+            respectHierarchy: false,
+            minDepthForFolder: 1,
+            minFilesForFolder: 1
         )
     }
     
@@ -179,6 +226,268 @@ actor FilenameScanner {
     /// Extract just filenames for LLM processing (optimized for batch inference)
     func extractFilenames(from scanResult: TaxonomyScanResult) -> [String] {
         scanResult.files.map { $0.filename }
+    }
+    
+    // MARK: - Hierarchy-Aware Scanning
+    
+    /// Scan a folder with hierarchy awareness
+    /// - Sub-folders become folder units (moved as complete units)
+    /// - Loose files at root level are analyzed individually
+    /// - Parameter folderURL: The folder to scan
+    /// - Returns: HierarchyScanResult with folders and loose files separated
+    func scanWithHierarchy(folder folderURL: URL) async throws -> HierarchyScanResult {
+        NSLog("🔍 [Scanner] Starting hierarchy-aware scan of: \(folderURL.path)")
+        NSLog("🔍 [Scanner] Config: respectHierarchy=\(config.respectHierarchy), minDepth=\(config.minDepthForFolder), minFiles=\(config.minFilesForFolder)")
+        
+        guard fileManager.fileExists(atPath: folderURL.path) else {
+            NSLog("❌ [Scanner] Folder not found: \(folderURL.path)")
+            throw ScanError.folderNotFound(folderURL.path)
+        }
+        
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: folderURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            NSLog("❌ [Scanner] Not a directory: \(folderURL.path)")
+            throw ScanError.notADirectory(folderURL.path)
+        }
+        
+        let startTime = Date()
+        var folders: [ScannedFolder] = []
+        var looseFiles: [TaxonomyScannedFile] = []
+        var skippedCount = 0
+        
+        // Get immediate children of the scan root
+        let contents: [URL]
+        do {
+            contents = try fileManager.contentsOfDirectory(
+                at: folderURL,
+                includingPropertiesForKeys: [.isDirectoryKey, .isHiddenKey],
+                options: config.includeHidden ? [] : [.skipsHiddenFiles]
+            )
+        } catch {
+            throw ScanError.enumerationFailed
+        }
+        
+        NSLog("🔍 [Scanner] Found \(contents.count) immediate children")
+        
+        // Process each immediate child
+        for itemURL in contents {
+            // Check excluded directories
+            let itemName = itemURL.lastPathComponent
+            if config.excludedDirectories.contains(itemName) {
+                skippedCount += 1
+                continue
+            }
+            
+            let resourceValues = try? itemURL.resourceValues(forKeys: [.isDirectoryKey, .isHiddenKey])
+            
+            // Skip hidden items if configured
+            if !config.includeHidden && (resourceValues?.isHidden == true) {
+                skippedCount += 1
+                continue
+            }
+            
+            if resourceValues?.isDirectory == true {
+                // This is a sub-folder - scan it as a unit
+                let scannedFolder = try await scanFolderAsUnit(
+                    url: itemURL,
+                    relativeTo: folderURL,
+                    depth: 1
+                )
+                
+                // Only treat as folder unit if it meets minimum file threshold
+                if scannedFolder.fileCount >= config.minFilesForFolder {
+                    folders.append(scannedFolder)
+                    NSLog("📁 [Scanner] Folder unit: '\(scannedFolder.folderName)' (\(scannedFolder.fileCount) files)")
+                } else if scannedFolder.fileCount > 0 {
+                    // Flatten: add contained files as loose files
+                    looseFiles.append(contentsOf: scannedFolder.containedFiles)
+                    NSLog("📄 [Scanner] Flattened folder: '\(scannedFolder.folderName)' (\(scannedFolder.fileCount) files below threshold)")
+                }
+                // Empty folders are silently skipped
+                
+            } else {
+                // This is a loose file at root level
+                if let file = try? scanSingleFile(url: itemURL, relativeTo: folderURL) {
+                    looseFiles.append(file)
+                } else {
+                    skippedCount += 1
+                }
+            }
+            
+            // Check limits
+            let totalFiles = folders.reduce(0) { $0 + $1.fileCount } + looseFiles.count
+            if totalFiles >= config.maxFiles {
+                NSLog("⚠️ [Scanner] Reached file limit: \(config.maxFiles)")
+                break
+            }
+        }
+        
+        let duration = Date().timeIntervalSince(startTime)
+        let totalFiles = folders.reduce(0) { $0 + $1.fileCount } + looseFiles.count
+        
+        NSLog("✅ [Scanner] Hierarchy scan complete in %.2fs", duration)
+        NSLog("✅ [Scanner] Result: \(folders.count) folders, \(looseFiles.count) loose files, \(totalFiles) total files")
+        
+        return HierarchyScanResult(
+            sourceFolder: folderURL,
+            sourceFolderName: folderURL.lastPathComponent,
+            folders: folders,
+            looseFiles: looseFiles,
+            skippedCount: skippedCount,
+            scanDuration: duration,
+            reachedLimit: totalFiles >= config.maxFiles
+        )
+    }
+    
+    /// Scan a folder and all its contents as a unit
+    /// - Parameters:
+    ///   - url: The folder URL
+    ///   - rootURL: The scan root for computing relative paths
+    ///   - depth: Current depth level
+    /// - Returns: ScannedFolder containing all files recursively
+    private func scanFolderAsUnit(
+        url: URL,
+        relativeTo rootURL: URL,
+        depth: Int
+    ) async throws -> ScannedFolder {
+        var containedFiles: [TaxonomyScannedFile] = []
+        var latestModification: Date?
+        
+        // Recursively enumerate all files in this folder
+        let resourceKeys: Set<URLResourceKey> = [
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .isHiddenKey,
+            .fileSizeKey,
+            .creationDateKey,
+            .contentModificationDateKey,
+            .contentTypeKey
+        ]
+        
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: Array(resourceKeys),
+            options: config.includeHidden ? [] : [.skipsHiddenFiles]
+        ) else {
+            throw ScanError.enumerationFailed
+        }
+        
+        while let fileURL = enumerator.nextObject() as? URL {
+            // Skip excluded directories
+            if config.excludedDirectories.contains(fileURL.lastPathComponent) {
+                enumerator.skipDescendants()
+                continue
+            }
+            
+            guard let resourceValues = try? fileURL.resourceValues(forKeys: resourceKeys) else {
+                continue
+            }
+            
+            // Skip directories (we're flattening into this folder)
+            if resourceValues.isDirectory == true {
+                continue
+            }
+            
+            // Skip non-regular files
+            guard resourceValues.isRegularFile == true else {
+                continue
+            }
+            
+            // Check extension exclusions
+            let ext = fileURL.pathExtension.lowercased()
+            let filename = fileURL.lastPathComponent.lowercased()
+            if config.excludedExtensions.contains(".\(ext)") ||
+               config.excludedExtensions.contains(filename) {
+                continue
+            }
+            
+            // Check minimum file size
+            if let size = resourceValues.fileSize, size < config.minFileSize {
+                continue
+            }
+            
+            // Track latest modification
+            if let modDate = resourceValues.contentModificationDate {
+                if latestModification == nil || modDate > latestModification! {
+                    latestModification = modDate
+                }
+            }
+            
+            // Create scanned file record
+            let scannedFile = TaxonomyScannedFile(
+                url: fileURL,
+                filename: fileURL.lastPathComponent,
+                fileExtension: fileURL.pathExtension,
+                relativePath: fileURL.path.replacingOccurrences(of: rootURL.path + "/", with: ""),
+                fileSize: Int64(resourceValues.fileSize ?? 0),
+                createdAt: resourceValues.creationDate,
+                modifiedAt: resourceValues.contentModificationDate,
+                contentType: resourceValues.contentType
+            )
+            
+            containedFiles.append(scannedFile)
+            
+            // Safety limit per folder
+            if containedFiles.count >= config.maxFiles {
+                break
+            }
+        }
+        
+        let totalSize = containedFiles.reduce(0) { $0 + $1.fileSize }
+        let relativePath = url.path.replacingOccurrences(of: rootURL.path + "/", with: "")
+        
+        return ScannedFolder(
+            url: url,
+            folderName: url.lastPathComponent,
+            relativePath: relativePath,
+            depth: depth,
+            containedFiles: containedFiles,
+            totalSize: totalSize,
+            modifiedAt: latestModification
+        )
+    }
+    
+    /// Scan a single file and return its metadata
+    private func scanSingleFile(url: URL, relativeTo rootURL: URL) throws -> TaxonomyScannedFile? {
+        let resourceKeys: Set<URLResourceKey> = [
+            .isRegularFileKey,
+            .fileSizeKey,
+            .creationDateKey,
+            .contentModificationDateKey,
+            .contentTypeKey
+        ]
+        
+        let resourceValues = try url.resourceValues(forKeys: resourceKeys)
+        
+        // Must be a regular file
+        guard resourceValues.isRegularFile == true else {
+            return nil
+        }
+        
+        // Check extension exclusions
+        let ext = url.pathExtension.lowercased()
+        let filename = url.lastPathComponent.lowercased()
+        if config.excludedExtensions.contains(".\(ext)") ||
+           config.excludedExtensions.contains(filename) {
+            return nil
+        }
+        
+        // Check minimum file size
+        if let size = resourceValues.fileSize, size < config.minFileSize {
+            return nil
+        }
+        
+        return TaxonomyScannedFile(
+            url: url,
+            filename: url.lastPathComponent,
+            fileExtension: url.pathExtension,
+            relativePath: url.path.replacingOccurrences(of: rootURL.path + "/", with: ""),
+            fileSize: Int64(resourceValues.fileSize ?? 0),
+            createdAt: resourceValues.creationDate,
+            modifiedAt: resourceValues.contentModificationDate,
+            contentType: resourceValues.contentType
+        )
     }
     
     /// Group files by extension for analysis
@@ -335,6 +644,173 @@ struct TaxonomyScannedFile: Identifiable, Hashable, Sendable {
         }
         let docExtensions = ["pdf", "doc", "docx", "txt", "rtf", "odt", "xls", "xlsx", "ppt", "pptx"]
         return docExtensions.contains(fileExtension.lowercased())
+    }
+}
+
+// MARK: - Hierarchy-Aware Types
+
+/// A folder that will be moved as a complete unit during organization
+/// Internal structure is preserved - all contained files stay together
+struct ScannedFolder: Identifiable, Hashable, Sendable {
+    let id: UUID
+    let url: URL
+    let folderName: String
+    let relativePath: String          // Path relative to scan root
+    let depth: Int                     // How deep in folder tree (1 = immediate child of root)
+    let containedFiles: [TaxonomyScannedFile]
+    let totalSize: Int64
+    let modifiedAt: Date?
+    
+    /// Number of files in this folder (including nested)
+    var fileCount: Int { containedFiles.count }
+    
+    /// Formatted total size for display
+    var formattedSize: String {
+        ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file)
+    }
+    
+    /// Dominant file types in this folder (for categorization hints)
+    var dominantFileTypes: [UTType] {
+        let types = containedFiles.compactMap { $0.contentType }
+        let grouped = Dictionary(grouping: types) { $0 }
+        return grouped.sorted { $0.value.count > $1.value.count }
+            .prefix(3)
+            .map { $0.key }
+    }
+    
+    /// Build context string for LLM categorization
+    var suggestedContext: String {
+        let fileTypeGroups = Dictionary(grouping: containedFiles) { file -> String in
+            if file.isImage { return "image" }
+            if file.isVideo { return "video" }
+            if file.isAudio { return "audio" }
+            if file.isDocument { return "document" }
+            return "other"
+        }
+        
+        let summary = fileTypeGroups.map { "\($0.value.count) \($0.key)(s)" }
+            .joined(separator: ", ")
+        
+        return "Folder '\(folderName)' contains \(summary)"
+    }
+    
+    init(
+        id: UUID = UUID(),
+        url: URL,
+        folderName: String,
+        relativePath: String,
+        depth: Int,
+        containedFiles: [TaxonomyScannedFile],
+        totalSize: Int64,
+        modifiedAt: Date?
+    ) {
+        self.id = id
+        self.url = url
+        self.folderName = folderName
+        self.relativePath = relativePath
+        self.depth = depth
+        self.containedFiles = containedFiles
+        self.totalSize = totalSize
+        self.modifiedAt = modifiedAt
+    }
+}
+
+/// Unified type representing either a folder unit or an individual file
+/// Used for displaying and processing scan results in the UI
+enum ScanUnit: Identifiable, Sendable {
+    case folder(ScannedFolder)        // Folder moves as unit
+    case file(TaxonomyScannedFile)    // Individual file moves separately
+    
+    var id: UUID {
+        switch self {
+        case .folder(let f): return f.id
+        case .file(let f): return f.id
+        }
+    }
+    
+    var displayName: String {
+        switch self {
+        case .folder(let f): return f.folderName
+        case .file(let f): return f.filename
+        }
+    }
+    
+    var url: URL {
+        switch self {
+        case .folder(let f): return f.url
+        case .file(let f): return f.url
+        }
+    }
+    
+    var isFolder: Bool {
+        if case .folder = self { return true }
+        return false
+    }
+    
+    var totalSize: Int64 {
+        switch self {
+        case .folder(let f): return f.totalSize
+        case .file(let f): return f.fileSize
+        }
+    }
+    
+    var formattedSize: String {
+        ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file)
+    }
+}
+
+/// Result of hierarchy-aware scanning
+/// Separates sub-folders (as units) from loose files (analyzed individually)
+struct HierarchyScanResult: Sendable {
+    let sourceFolder: URL
+    let sourceFolderName: String
+    let folders: [ScannedFolder]           // Sub-folders to move as units
+    let looseFiles: [TaxonomyScannedFile]  // Files not in sub-folders
+    let skippedCount: Int
+    let scanDuration: TimeInterval
+    let reachedLimit: Bool
+    
+    /// Total items (folders + loose files)
+    var totalItems: Int { folders.count + looseFiles.count }
+    
+    /// Total size of all items
+    var totalSize: Int64 {
+        let folderSize = folders.reduce(0) { $0 + $1.totalSize }
+        let fileSize = looseFiles.reduce(0) { $0 + $1.fileSize }
+        return folderSize + fileSize
+    }
+    
+    /// Formatted total size
+    var formattedTotalSize: String {
+        ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file)
+    }
+    
+    /// Total file count (including files inside folders)
+    var totalFileCount: Int {
+        let folderFiles = folders.reduce(0) { $0 + $1.fileCount }
+        return folderFiles + looseFiles.count
+    }
+    
+    /// Convert to unified ScanUnit array for UI display
+    var allUnits: [ScanUnit] {
+        let folderUnits = folders.map { ScanUnit.folder($0) }
+        let fileUnits = looseFiles.map { ScanUnit.file($0) }
+        return folderUnits + fileUnits
+    }
+    
+    /// Convert to legacy TaxonomyScanResult (flattens folders)
+    /// Useful for compatibility with existing code paths
+    func toLegacyScanResult() -> TaxonomyScanResult {
+        let allFiles = folders.flatMap { $0.containedFiles } + looseFiles
+        return TaxonomyScanResult(
+            folderURL: sourceFolder,
+            folderName: sourceFolderName,
+            files: allFiles,
+            directoryCount: folders.count,
+            skippedCount: skippedCount,
+            scanDuration: scanDuration,
+            reachedLimit: reachedLimit
+        )
     }
 }
 

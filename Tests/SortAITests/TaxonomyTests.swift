@@ -745,5 +745,381 @@ struct FilenameScannerTests {
         // Check it formats to some readable string
         #expect(!result.formattedTotalSize.isEmpty)
     }
+    
+    @Test("Scanner hierarchy configuration defaults")
+    func testScannerHierarchyConfigurationDefaults() {
+        let config = FilenameScanner.Configuration.default
+        
+        #expect(config.respectHierarchy == true)
+        #expect(config.minDepthForFolder == 1)
+        #expect(config.minFilesForFolder == 1)
+    }
+    
+    @Test("Scanner flat configuration disables hierarchy")
+    func testScannerFlatConfiguration() {
+        let config = FilenameScanner.Configuration.flat
+        
+        #expect(config.respectHierarchy == false)
+    }
+}
+
+// MARK: - Hierarchy-Aware Scanning Tests
+
+@Suite("HierarchyScanning Tests")
+struct HierarchyScanningTests {
+    
+    // MARK: - ScannedFolder Tests
+    
+    @Test("Create ScannedFolder")
+    func testCreateScannedFolder() {
+        let file1 = TaxonomyScannedFile(
+            url: URL(fileURLWithPath: "/test/Resumes/resume_v1.pdf"),
+            filename: "resume_v1.pdf",
+            fileExtension: "pdf",
+            fileSize: 50000,
+            modificationDate: Date()
+        )
+        
+        let file2 = TaxonomyScannedFile(
+            url: URL(fileURLWithPath: "/test/Resumes/resume_v2.docx"),
+            filename: "resume_v2.docx",
+            fileExtension: "docx",
+            fileSize: 75000,
+            modificationDate: Date()
+        )
+        
+        let folder = ScannedFolder(
+            url: URL(fileURLWithPath: "/test/Resumes"),
+            folderName: "Resumes",
+            relativePath: "Resumes",
+            depth: 1,
+            containedFiles: [file1, file2],
+            totalSize: 125000,
+            modifiedAt: Date()
+        )
+        
+        #expect(folder.folderName == "Resumes")
+        #expect(folder.fileCount == 2)
+        #expect(folder.totalSize == 125000)
+        #expect(folder.depth == 1)
+        #expect(!folder.formattedSize.isEmpty)
+    }
+    
+    @Test("ScannedFolder suggestedContext")
+    func testScannedFolderContext() {
+        let pdf = TaxonomyScannedFile(
+            url: URL(fileURLWithPath: "/test/Docs/file.pdf"),
+            filename: "file.pdf",
+            fileExtension: "pdf",
+            fileSize: 1000,
+            modificationDate: Date()
+        )
+        
+        let folder = ScannedFolder(
+            url: URL(fileURLWithPath: "/test/Docs"),
+            folderName: "Docs",
+            relativePath: "Docs",
+            depth: 1,
+            containedFiles: [pdf],
+            totalSize: 1000,
+            modifiedAt: nil
+        )
+        
+        let context = folder.suggestedContext
+        #expect(context.contains("Docs"))
+        #expect(context.contains("document"))
+    }
+    
+    // MARK: - ScanUnit Tests
+    
+    @Test("ScanUnit folder case")
+    func testScanUnitFolder() {
+        let folder = ScannedFolder(
+            url: URL(fileURLWithPath: "/test/MyFolder"),
+            folderName: "MyFolder",
+            relativePath: "MyFolder",
+            depth: 1,
+            containedFiles: [],
+            totalSize: 0,
+            modifiedAt: nil
+        )
+        
+        let unit = ScanUnit.folder(folder)
+        
+        #expect(unit.displayName == "MyFolder")
+        #expect(unit.isFolder)
+        #expect(unit.url.lastPathComponent == "MyFolder")
+    }
+    
+    @Test("ScanUnit file case")
+    func testScanUnitFile() {
+        let file = TaxonomyScannedFile(
+            url: URL(fileURLWithPath: "/test/document.pdf"),
+            filename: "document.pdf",
+            fileExtension: "pdf",
+            fileSize: 1024,
+            modificationDate: Date()
+        )
+        
+        let unit = ScanUnit.file(file)
+        
+        #expect(unit.displayName == "document.pdf")
+        #expect(!unit.isFolder)
+        #expect(unit.totalSize == 1024)
+    }
+    
+    // MARK: - HierarchyScanResult Tests
+    
+    @Test("HierarchyScanResult totals")
+    func testHierarchyScanResultTotals() {
+        let file1 = TaxonomyScannedFile(
+            url: URL(fileURLWithPath: "/test/loose.pdf"),
+            filename: "loose.pdf",
+            fileExtension: "pdf",
+            fileSize: 1000,
+            modificationDate: Date()
+        )
+        
+        let file2 = TaxonomyScannedFile(
+            url: URL(fileURLWithPath: "/test/Folder/inside.pdf"),
+            filename: "inside.pdf",
+            fileExtension: "pdf",
+            fileSize: 2000,
+            modificationDate: Date()
+        )
+        
+        let folder = ScannedFolder(
+            url: URL(fileURLWithPath: "/test/Folder"),
+            folderName: "Folder",
+            relativePath: "Folder",
+            depth: 1,
+            containedFiles: [file2],
+            totalSize: 2000,
+            modifiedAt: nil
+        )
+        
+        let result = HierarchyScanResult(
+            sourceFolder: URL(fileURLWithPath: "/test"),
+            sourceFolderName: "test",
+            folders: [folder],
+            looseFiles: [file1],
+            skippedCount: 0,
+            scanDuration: 0.5,
+            reachedLimit: false
+        )
+        
+        #expect(result.totalItems == 2) // 1 folder + 1 loose file
+        #expect(result.totalFileCount == 2) // 1 in folder + 1 loose
+        #expect(result.totalSize == 3000) // 2000 + 1000
+        #expect(result.allUnits.count == 2)
+    }
+    
+    @Test("HierarchyScanResult toLegacyScanResult")
+    func testHierarchyScanResultToLegacy() {
+        let looseFile = TaxonomyScannedFile(
+            url: URL(fileURLWithPath: "/test/loose.txt"),
+            filename: "loose.txt",
+            fileExtension: "txt",
+            fileSize: 100,
+            modificationDate: Date()
+        )
+        
+        let folderFile = TaxonomyScannedFile(
+            url: URL(fileURLWithPath: "/test/Folder/inside.txt"),
+            filename: "inside.txt",
+            fileExtension: "txt",
+            fileSize: 200,
+            modificationDate: Date()
+        )
+        
+        let folder = ScannedFolder(
+            url: URL(fileURLWithPath: "/test/Folder"),
+            folderName: "Folder",
+            relativePath: "Folder",
+            depth: 1,
+            containedFiles: [folderFile],
+            totalSize: 200,
+            modifiedAt: nil
+        )
+        
+        let hierarchyResult = HierarchyScanResult(
+            sourceFolder: URL(fileURLWithPath: "/test"),
+            sourceFolderName: "test",
+            folders: [folder],
+            looseFiles: [looseFile],
+            skippedCount: 5,
+            scanDuration: 1.0,
+            reachedLimit: false
+        )
+        
+        let legacy = hierarchyResult.toLegacyScanResult()
+        
+        #expect(legacy.files.count == 2) // Both files flattened
+        #expect(legacy.directoryCount == 1)
+        #expect(legacy.skippedCount == 5)
+        #expect(legacy.scanDuration == 1.0)
+    }
+    
+    // MARK: - Integration Tests (require temp directory)
+    
+    @Test("Scan with hierarchy separates folders from loose files")
+    func testScanWithHierarchy() async throws {
+        // Create temporary test directory structure
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SortAI_HierarchyTest_\(UUID().uuidString)")
+        
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        
+        // Create structure:
+        // tempDir/
+        // ├── loose_file.txt (loose file)
+        // ├── Resumes/ (folder unit)
+        // │   └── resume.pdf
+        // └── Photos/ (folder unit)
+        //     └── photo.jpg
+        
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempDir.appendingPathComponent("Resumes"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempDir.appendingPathComponent("Photos"), withIntermediateDirectories: true)
+        
+        // Create files (must be >= 100 bytes to pass minFileSize check)
+        let testContent = String(repeating: "test content ", count: 20) // ~260 bytes
+        try testContent.write(to: tempDir.appendingPathComponent("loose_file.txt"), atomically: true, encoding: .utf8)
+        try testContent.write(to: tempDir.appendingPathComponent("Resumes/resume.pdf"), atomically: true, encoding: .utf8)
+        try testContent.write(to: tempDir.appendingPathComponent("Photos/photo.jpg"), atomically: true, encoding: .utf8)
+        
+        // Scan with hierarchy
+        let scanner = FilenameScanner()
+        let result = try await scanner.scanWithHierarchy(folder: tempDir)
+        
+        // Verify results
+        #expect(result.folders.count == 2, "Expected 2 folders (Resumes, Photos), got \(result.folders.count)")
+        #expect(result.looseFiles.count == 1, "Expected 1 loose file, got \(result.looseFiles.count)")
+        #expect(result.totalFileCount == 3, "Expected 3 total files")
+        
+        // Verify folder names
+        let folderNames = Set(result.folders.map { $0.folderName })
+        #expect(folderNames.contains("Resumes"))
+        #expect(folderNames.contains("Photos"))
+        
+        // Verify loose file
+        #expect(result.looseFiles[0].filename == "loose_file.txt")
+    }
+    
+    @Test("Scan with hierarchy flattens empty folders")
+    func testScanWithHierarchyFlattensEmptyFolders() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SortAI_EmptyFolderTest_\(UUID().uuidString)")
+        
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        
+        // Create structure:
+        // tempDir/
+        // ├── EmptyFolder/ (empty - should be ignored)
+        // └── NonEmpty/
+        //     └── file.txt
+        
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempDir.appendingPathComponent("EmptyFolder"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempDir.appendingPathComponent("NonEmpty"), withIntermediateDirectories: true)
+        
+        let testContent = String(repeating: "content ", count: 50)
+        try testContent.write(to: tempDir.appendingPathComponent("NonEmpty/file.txt"), atomically: true, encoding: .utf8)
+        
+        let scanner = FilenameScanner()
+        let result = try await scanner.scanWithHierarchy(folder: tempDir)
+        
+        // Empty folder should not appear
+        #expect(result.folders.count == 1, "Expected 1 folder (NonEmpty only)")
+        #expect(result.folders[0].folderName == "NonEmpty")
+    }
+    
+    @Test("Scan with hierarchy respects minFilesForFolder threshold")
+    func testScanWithHierarchyMinFilesThreshold() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SortAI_MinFilesTest_\(UUID().uuidString)")
+        
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        
+        // Create structure:
+        // tempDir/
+        // ├── BigFolder/ (2 files - above threshold of 2)
+        // │   ├── file1.txt
+        // │   └── file2.txt
+        // └── SmallFolder/ (1 file - below threshold of 2)
+        //     └── only.txt
+        
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempDir.appendingPathComponent("BigFolder"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempDir.appendingPathComponent("SmallFolder"), withIntermediateDirectories: true)
+        
+        let testContent = String(repeating: "content ", count: 50)
+        try testContent.write(to: tempDir.appendingPathComponent("BigFolder/file1.txt"), atomically: true, encoding: .utf8)
+        try testContent.write(to: tempDir.appendingPathComponent("BigFolder/file2.txt"), atomically: true, encoding: .utf8)
+        try testContent.write(to: tempDir.appendingPathComponent("SmallFolder/only.txt"), atomically: true, encoding: .utf8)
+        
+        // Create scanner with minFilesForFolder = 2
+        let config = FilenameScanner.Configuration(
+            maxFiles: 10000,
+            includeHidden: false,
+            excludedExtensions: [],
+            excludedDirectories: [],
+            minFileSize: 100,
+            respectHierarchy: true,
+            minDepthForFolder: 1,
+            minFilesForFolder: 2  // Require at least 2 files
+        )
+        let scanner = FilenameScanner(configuration: config)
+        let result = try await scanner.scanWithHierarchy(folder: tempDir)
+        
+        // BigFolder should be a folder unit, SmallFolder's file should be flattened to loose
+        #expect(result.folders.count == 1, "Expected 1 folder (BigFolder)")
+        #expect(result.folders[0].folderName == "BigFolder")
+        #expect(result.looseFiles.count == 1, "Expected 1 loose file (from SmallFolder)")
+        #expect(result.looseFiles[0].filename == "only.txt")
+    }
+    
+    @Test("Scan with hierarchy preserves nested structure in folders")
+    func testScanWithHierarchyPreservesNestedStructure() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SortAI_NestedTest_\(UUID().uuidString)")
+        
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        
+        // Create structure:
+        // tempDir/
+        // └── Resumes/ (folder unit)
+        //     ├── resume.pdf
+        //     └── 2024/
+        //         └── latest.pdf
+        
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempDir.appendingPathComponent("Resumes/2024"), withIntermediateDirectories: true)
+        
+        let testContent = String(repeating: "content ", count: 50)
+        try testContent.write(to: tempDir.appendingPathComponent("Resumes/resume.pdf"), atomically: true, encoding: .utf8)
+        try testContent.write(to: tempDir.appendingPathComponent("Resumes/2024/latest.pdf"), atomically: true, encoding: .utf8)
+        
+        let scanner = FilenameScanner()
+        let result = try await scanner.scanWithHierarchy(folder: tempDir)
+        
+        // Should have 1 folder unit with 2 files inside (preserving internal structure)
+        #expect(result.folders.count == 1)
+        #expect(result.folders[0].folderName == "Resumes")
+        #expect(result.folders[0].fileCount == 2, "Nested files should be included")
+        
+        // Verify both files are in the folder
+        let filenames = Set(result.folders[0].containedFiles.map { $0.filename })
+        #expect(filenames.contains("resume.pdf"))
+        #expect(filenames.contains("latest.pdf"))
+    }
 }
 
