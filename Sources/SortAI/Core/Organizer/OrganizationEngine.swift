@@ -140,6 +140,165 @@ actor OrganizationEngine {
         }
     }
     
+    // MARK: - Hierarchy-Aware Planning
+    
+    /// Plan organization with hierarchy awareness
+    /// Folders move as complete units, loose files move individually
+    func planHierarchyOrganization(
+        scanResult: HierarchyScanResult,
+        folderAssignments: [FolderCategoryAssignment],
+        fileAssignments: [FileAssignment],
+        tree: TaxonomyTree,
+        outputFolder: URL
+    ) async -> HierarchyAwareOrganizationPlan {
+        NSLog("📋 [OrganizationEngine] Planning hierarchy-aware organization")
+        NSLog("📋 [OrganizationEngine] \(scanResult.folders.count) folders, \(scanResult.looseFiles.count) loose files")
+        
+        var folderOps: [FolderOrganizationOperation] = []
+        var fileOps: [OrganizationOperation] = []
+        var folderConflicts: [FolderOrganizationConflict] = []
+        var fileConflicts: [OrganizationConflict] = []
+        
+        // Build assignment lookups
+        let folderAssignmentMap = Dictionary(
+            folderAssignments.map { ($0.folderId, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        
+        let fileAssignmentMap = Dictionary(
+            fileAssignments.map { ($0.fileId, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        
+        // Plan folder operations
+        for folder in scanResult.folders {
+            guard let assignment = folderAssignmentMap[folder.id] else {
+                // Unassigned folder - use Uncategorized
+                let destFolder = outputFolder.appendingPathComponent(config.uncategorizedFolderName)
+                let destPath = destFolder.appendingPathComponent(folder.folderName)
+                
+                if fileManager.fileExists(atPath: destPath.path) {
+                    folderConflicts.append(FolderOrganizationConflict(
+                        sourceFolder: folder,
+                        destinationPath: destPath,
+                        resolution: .askUser
+                    ))
+                } else {
+                    folderOps.append(FolderOrganizationOperation(
+                        sourceFolder: folder,
+                        destinationFolder: destFolder,
+                        destinationCategory: config.uncategorizedFolderName,
+                        confidence: 0.3,
+                        mode: config.mode
+                    ))
+                }
+                continue
+            }
+            
+            // Build destination from category path
+            let categoryPath = assignment.categoryPath
+            let destFolder = categoryPath.reduce(outputFolder) { $0.appendingPathComponent($1) }
+            let destPath = destFolder.appendingPathComponent(folder.folderName)
+            
+            // Check for conflicts
+            if fileManager.fileExists(atPath: destPath.path) {
+                folderConflicts.append(FolderOrganizationConflict(
+                    sourceFolder: folder,
+                    destinationPath: destPath,
+                    resolution: .askUser
+                ))
+            } else {
+                folderOps.append(FolderOrganizationOperation(
+                    sourceFolder: folder,
+                    destinationFolder: destFolder,
+                    destinationCategory: categoryPath.joined(separator: " / "),
+                    confidence: assignment.confidence,
+                    mode: config.mode
+                ))
+            }
+        }
+        
+        // Plan loose file operations (same as regular planning)
+        for file in scanResult.looseFiles {
+            guard let assignment = fileAssignmentMap[file.id] else {
+                // Unassigned file
+                let uncategorizedFolder = outputFolder.appendingPathComponent(config.uncategorizedFolderName)
+                let dest = uncategorizedFolder.appendingPathComponent(file.filename)
+                
+                if fileManager.fileExists(atPath: dest.path) {
+                    fileConflicts.append(OrganizationConflict(
+                        sourceFile: file,
+                        destinationPath: dest,
+                        resolution: .askUser
+                    ))
+                } else {
+                    fileOps.append(OrganizationOperation(
+                        sourceFile: file,
+                        destinationFolder: uncategorizedFolder,
+                        destinationPath: dest,
+                        mode: config.mode
+                    ))
+                }
+                continue
+            }
+            
+            // Build destination from category
+            guard let node = tree.node(byId: assignment.categoryId) else {
+                let uncategorizedFolder = outputFolder.appendingPathComponent(config.uncategorizedFolderName)
+                let dest = uncategorizedFolder.appendingPathComponent(file.filename)
+                
+                if fileManager.fileExists(atPath: dest.path) {
+                    fileConflicts.append(OrganizationConflict(
+                        sourceFile: file,
+                        destinationPath: dest,
+                        resolution: .askUser
+                    ))
+                } else {
+                    fileOps.append(OrganizationOperation(
+                        sourceFile: file,
+                        destinationFolder: uncategorizedFolder,
+                        destinationPath: dest,
+                        mode: config.mode
+                    ))
+                }
+                continue
+            }
+            
+            let categoryPath = tree.pathToNode(node)
+            let destFolder = categoryPath.reduce(outputFolder) { $0.appendingPathComponent($1.name) }
+            let destFile = destFolder.appendingPathComponent(file.filename)
+            
+            if fileManager.fileExists(atPath: destFile.path) {
+                fileConflicts.append(OrganizationConflict(
+                    sourceFile: file,
+                    destinationPath: destFile,
+                    resolution: .askUser
+                ))
+            } else {
+                fileOps.append(OrganizationOperation(
+                    sourceFile: file,
+                    destinationFolder: destFolder,
+                    destinationPath: destFile,
+                    mode: config.mode
+                ))
+            }
+        }
+        
+        let totalSize = folderOps.reduce(0) { $0 + $1.sourceFolder.totalSize } +
+                        fileOps.reduce(0) { $0 + $1.sourceFile.fileSize }
+        
+        NSLog("📋 [OrganizationEngine] Plan complete: \(folderOps.count) folder ops, \(fileOps.count) file ops")
+        NSLog("📋 [OrganizationEngine] Conflicts: \(folderConflicts.count) folder, \(fileConflicts.count) file")
+        
+        return HierarchyAwareOrganizationPlan(
+            folderOperations: folderOps,
+            fileOperations: fileOps,
+            folderConflicts: folderConflicts,
+            fileConflicts: fileConflicts,
+            estimatedSize: totalSize
+        )
+    }
+    
     // MARK: - Execution
     
     /// Execute the organization plan
@@ -383,3 +542,106 @@ struct FailedOperation: Sendable {
     let error: String
 }
 
+
+// MARK: - Hierarchy-Aware Organization Types
+
+/// Operation for moving a folder as a complete unit
+struct FolderOrganizationOperation: Sendable, Identifiable {
+    let id: UUID
+    let sourceFolder: ScannedFolder
+    let destinationFolder: URL          // Where the folder will be moved to
+    let destinationCategory: String     // Category name for display
+    let confidence: Double
+    let preserveInternalStructure: Bool // Always true for folder units
+    let mode: OrganizationMode
+    
+    init(
+        id: UUID = UUID(),
+        sourceFolder: ScannedFolder,
+        destinationFolder: URL,
+        destinationCategory: String,
+        confidence: Double,
+        mode: OrganizationMode
+    ) {
+        self.id = id
+        self.sourceFolder = sourceFolder
+        self.destinationFolder = destinationFolder
+        self.destinationCategory = destinationCategory
+        self.confidence = confidence
+        self.preserveInternalStructure = true
+        self.mode = mode
+    }
+}
+
+/// Conflict when organizing a folder
+final class FolderOrganizationConflict: @unchecked Sendable, Identifiable {
+    let id = UUID()
+    let sourceFolder: ScannedFolder
+    let destinationPath: URL
+    var resolution: ConflictResolution
+    
+    init(sourceFolder: ScannedFolder, destinationPath: URL, resolution: ConflictResolution) {
+        self.sourceFolder = sourceFolder
+        self.destinationPath = destinationPath
+        self.resolution = resolution
+    }
+}
+
+/// Organization plan that respects folder hierarchy
+/// Separates folder operations from individual file operations
+struct HierarchyAwareOrganizationPlan: Sendable {
+    let folderOperations: [FolderOrganizationOperation]
+    let fileOperations: [OrganizationOperation]
+    let folderConflicts: [FolderOrganizationConflict]
+    let fileConflicts: [OrganizationConflict]
+    let estimatedSize: Int64
+    
+    /// Total number of items to organize
+    var totalItems: Int {
+        folderOperations.count + fileOperations.count
+    }
+    
+    /// Total file count (including files inside folders)
+    var totalFileCount: Int {
+        let folderFiles = folderOperations.reduce(0) { $0 + $1.sourceFolder.fileCount }
+        return folderFiles + fileOperations.count
+    }
+    
+    /// Whether there are any conflicts to resolve
+    var hasConflicts: Bool {
+        !folderConflicts.isEmpty || !fileConflicts.isEmpty
+    }
+    
+    /// Convert to legacy OrganizationPlan (flattens folders into individual file ops)
+    func toLegacyPlan() -> OrganizationPlan {
+        var allFileOps = fileOperations
+        
+        // Flatten folder operations into file operations
+        for folderOp in folderOperations {
+            for file in folderOp.sourceFolder.containedFiles {
+                let destPath = folderOp.destinationFolder
+                    .appendingPathComponent(folderOp.sourceFolder.folderName)
+                    .appendingPathComponent(file.relativePath.replacingOccurrences(
+                        of: folderOp.sourceFolder.relativePath + "/",
+                        with: ""
+                    ))
+                
+                allFileOps.append(OrganizationOperation(
+                    sourceFile: file,
+                    destinationFolder: destPath.deletingLastPathComponent(),
+                    destinationPath: destPath,
+                    mode: folderOp.mode
+                ))
+            }
+        }
+        
+        // Combine conflicts
+        let allConflicts = fileConflicts
+        
+        return OrganizationPlan(
+            operations: allFileOps,
+            conflicts: allConflicts,
+            estimatedSize: estimatedSize
+        )
+    }
+}

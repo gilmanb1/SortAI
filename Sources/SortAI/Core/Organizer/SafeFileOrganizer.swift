@@ -262,6 +262,227 @@ actor SafeFileOrganizer {
         )
     }
     
+    // MARK: - Folder Organization
+    
+    /// Move a folder as a complete unit, preserving internal structure
+    func moveFolder(
+        folder: ScannedFolder,
+        assignment: FolderCategoryAssignment,
+        outputFolder: URL,
+        mode: MovementLogEntry.LLMMode = .full,
+        provider: String? = nil,
+        providerVersion: String? = nil
+    ) async throws -> SafeFolderOrganizationResult {
+        let fileManager = FileManager.default
+        
+        // Build destination path from category
+        let destFolder = assignment.categoryPath.reduce(outputFolder) { $0.appendingPathComponent($1) }
+        let destPath = destFolder.appendingPathComponent(folder.folderName)
+        
+        NSLog("📁 [SafeFileOrganizer] Moving folder '\(folder.folderName)' to '\(destPath.path)'")
+        
+        // Create destination parent folder
+        try fileManager.createDirectory(at: destFolder, withIntermediateDirectories: true)
+        
+        // Check for collision
+        if fileManager.fileExists(atPath: destPath.path) {
+            if config.autoResolveCollisions {
+                // Generate unique name for folder
+                let resolvedPath = try await resolveFolderCollision(destPath)
+                try await performFolderOperation(
+                    source: folder.url,
+                    destination: resolvedPath,
+                    mode: config.mode
+                )
+                
+                // Log the movement
+                if config.logMovements {
+                    try await logFolderMovement(
+                        folder: folder,
+                        from: folder.url,
+                        to: resolvedPath,
+                        mode: mode,
+                        provider: provider,
+                        providerVersion: providerVersion
+                    )
+                }
+                
+                return SafeFolderOrganizationResult(
+                    sourceFolder: folder,
+                    destinationPath: resolvedPath,
+                    success: true,
+                    collisionResolved: true,
+                    error: nil
+                )
+            } else {
+                return SafeFolderOrganizationResult(
+                    sourceFolder: folder,
+                    destinationPath: destPath,
+                    success: false,
+                    collisionResolved: false,
+                    error: "Destination folder already exists: \(destPath.path)"
+                )
+            }
+        }
+        
+        // Move folder
+        do {
+            try await performFolderOperation(
+                source: folder.url,
+                destination: destPath,
+                mode: config.mode
+            )
+            
+            // Log the movement
+            if config.logMovements {
+                try await logFolderMovement(
+                    folder: folder,
+                    from: folder.url,
+                    to: destPath,
+                    mode: mode,
+                    provider: provider,
+                    providerVersion: providerVersion
+                )
+            }
+            
+            return SafeFolderOrganizationResult(
+                sourceFolder: folder,
+                destinationPath: destPath,
+                success: true,
+                collisionResolved: false,
+                error: nil
+            )
+        } catch {
+            return SafeFolderOrganizationResult(
+                sourceFolder: folder,
+                destinationPath: destPath,
+                success: false,
+                collisionResolved: false,
+                error: error.localizedDescription
+            )
+        }
+    }
+    
+    /// Move multiple folders as units
+    func moveFolders(
+        folders: [ScannedFolder],
+        assignments: [FolderCategoryAssignment],
+        outputFolder: URL,
+        mode: MovementLogEntry.LLMMode = .full,
+        provider: String? = nil,
+        providerVersion: String? = nil,
+        progressCallback: (@Sendable (Int, Int) -> Void)? = nil
+    ) async throws -> [SafeFolderOrganizationResult] {
+        var results: [SafeFolderOrganizationResult] = []
+        
+        // Build assignment lookup
+        let assignmentMap = Dictionary(
+            assignments.map { ($0.folderId, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        
+        for (index, folder) in folders.enumerated() {
+            guard let assignment = assignmentMap[folder.id] else {
+                results.append(SafeFolderOrganizationResult(
+                    sourceFolder: folder,
+                    destinationPath: outputFolder,
+                    success: false,
+                    collisionResolved: false,
+                    error: "No assignment found for folder"
+                ))
+                progressCallback?(index + 1, folders.count)
+                continue
+            }
+            
+            let result = try await moveFolder(
+                folder: folder,
+                assignment: assignment,
+                outputFolder: outputFolder,
+                mode: mode,
+                provider: provider,
+                providerVersion: providerVersion
+            )
+            results.append(result)
+            progressCallback?(index + 1, folders.count)
+        }
+        
+        return results
+    }
+    
+    /// Perform the actual folder operation
+    private func performFolderOperation(source: URL, destination: URL, mode: OrganizationMode) async throws {
+        let fileManager = FileManager.default
+        
+        switch mode {
+        case .move:
+            try fileManager.moveItem(at: source, to: destination)
+            
+        case .copy:
+            try fileManager.copyItem(at: source, to: destination)
+            
+        case .symlink:
+            // Create symlink at destination pointing to source
+            try fileManager.createSymbolicLink(at: destination, withDestinationURL: source)
+        }
+    }
+    
+    /// Resolve folder name collision
+    private func resolveFolderCollision(_ url: URL) async throws -> URL {
+        let fileManager = FileManager.default
+        let parentDir = url.deletingLastPathComponent()
+        let baseName = url.lastPathComponent
+        
+        var counter = 1
+        var newPath: URL
+        
+        repeat {
+            let newName = "\(baseName) (\(counter))"
+            newPath = parentDir.appendingPathComponent(newName)
+            counter += 1
+        } while fileManager.fileExists(atPath: newPath.path) && counter < 1000
+        
+        if counter >= 1000 {
+            throw SafeOrganizerError.collisionResolutionFailed(url.path)
+        }
+        
+        return newPath
+    }
+    
+    /// Log folder movement to database
+    private func logFolderMovement(
+        folder: ScannedFolder,
+        from source: URL,
+        to destination: URL,
+        mode: MovementLogEntry.LLMMode,
+        provider: String?,
+        providerVersion: String?
+    ) async throws {
+        // Log an entry for each file in the folder
+        for file in folder.containedFiles {
+            let relativePath = file.url.path.replacingOccurrences(of: source.path, with: "")
+            let newFilePath = destination.appendingPathComponent(relativePath)
+            
+            let logEntry = MovementLogEntry(
+                id: UUID().uuidString,
+                timestamp: Date(),
+                source: file.url,
+                destination: newFilePath,
+                reason: "Folder: \(folder.folderName)",
+                confidence: 1.0, // Folder move confidence is delegated to folder-level
+                mode: mode,
+                provider: provider,
+                providerVersion: providerVersion,
+                operationType: config.mode == .move ? .move :
+                               config.mode == .copy ? .copy : .symlink,
+                undoable: config.enableUndo,
+                undoneAt: nil
+            )
+            
+            try database.movementLog.create(logEntry)
+        }
+    }
+
+    
     // MARK: - Collision Resolution
     
     /// Resolve file name collision using configured strategy
@@ -402,6 +623,15 @@ struct SafeOrganizationResult: Sendable {
         guard totalFiles > 0 else { return 0 }
         return Double(successCount) / Double(totalFiles)
     }
+}
+
+/// Result of organizing a single folder as a unit
+struct SafeFolderOrganizationResult: Sendable {
+    let sourceFolder: ScannedFolder
+    let destinationPath: URL
+    let success: Bool
+    let collisionResolved: Bool
+    let error: String?
 }
 
 // MARK: - Errors
