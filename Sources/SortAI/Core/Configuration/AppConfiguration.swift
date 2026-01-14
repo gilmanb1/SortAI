@@ -111,6 +111,12 @@ enum SortAIDefaultsKey {
     static let autoInstallOllama = "autoInstallOllama"
     static let enableFAISS = "enableFAISS"
     static let useAppleEmbeddings = "useAppleEmbeddings"
+    
+    // Hierarchy-aware categorization settings
+    static let respectHierarchy = "respectHierarchy"
+    static let minFilesForFolder = "minFilesForFolder"
+    static let allowUserFlatten = "allowUserFlatten"
+    static let folderReviewThreshold = "folderReviewThreshold"
 }
 
 /// Registers default values in UserDefaults at app startup
@@ -154,6 +160,12 @@ enum SortAIDefaults {
             SortAIDefaultsKey.respectBatteryStatus: true,
             SortAIDefaultsKey.enableWatchMode: false,
             SortAIDefaultsKey.watchQuietPeriod: 3.0,
+            
+            // Hierarchy-aware categorization
+            SortAIDefaultsKey.respectHierarchy: true,
+            SortAIDefaultsKey.minFilesForFolder: 1,
+            SortAIDefaultsKey.allowUserFlatten: true,
+            SortAIDefaultsKey.folderReviewThreshold: 0.75,
         ]
         
         UserDefaults.standard.register(defaults: defaults)
@@ -381,12 +393,43 @@ struct OrganizationConfiguration: Codable, Sendable, Equatable {
     /// Characters to replace in filenames
     var invalidCharacters: String
     
+    // MARK: - Hierarchy Settings
+    
+    /// Whether to respect folder hierarchy (treat sub-folders as units)
+    var respectHierarchy: Bool
+    
+    /// Minimum files in a folder to treat it as a unit (folders with fewer files are flattened)
+    var minFilesForFolder: Int
+    
+    /// Whether to allow users to flatten folders from the preview UI
+    var allowUserFlatten: Bool
+    
+    /// Confidence threshold below which folders are flagged for review
+    var folderReviewThreshold: Double
+    
     static let `default` = OrganizationConfiguration(
         defaultMode: .copy,
         createMetadataFiles: false,
         preserveTimestamps: true,
         maxFilenameLength: 200,
-        invalidCharacters: "/\\:*?\"<>|"
+        invalidCharacters: "/\\:*?\"<>|",
+        respectHierarchy: true,
+        minFilesForFolder: 1,
+        allowUserFlatten: true,
+        folderReviewThreshold: 0.75
+    )
+    
+    /// Legacy configuration without hierarchy awareness
+    static let flat = OrganizationConfiguration(
+        defaultMode: .copy,
+        createMetadataFiles: false,
+        preserveTimestamps: true,
+        maxFilenameLength: 200,
+        invalidCharacters: "/\\:*?\"<>|",
+        respectHierarchy: false,
+        minFilesForFolder: 1,
+        allowUserFlatten: false,
+        folderReviewThreshold: 0.75
     )
 }
 
