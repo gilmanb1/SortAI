@@ -61,6 +61,13 @@ final class AppState {
     var outputFolder: URL?
     var organizationMode: OrganizationMode = .copy
     
+    // Undo system - SafeFileOrganizer with UndoStack and movement logging
+    private var undoStack: UndoStack?
+    private var safeOrganizer: SafeFileOrganizer?
+    var canUndoLastMove: Bool = false
+    var canRedoLastMove: Bool = false
+    var undoableOperationsCount: Int = 0
+    
     // Selection state for bulk operations
     var selectedItemIds: Set<UUID> = []
     var lastSelectedItemId: UUID?  // For shift-click range selection
@@ -101,6 +108,10 @@ final class AppState {
         // Set organization mode from config
         organizationMode = configManager.config.organization.defaultMode
         NSLog("📊 [DEBUG] Organization mode: %@", String(describing: organizationMode))
+        
+        // Initialize undo stack
+        undoStack = UndoStack(maxStackSize: 100)
+        NSLog("📊 [DEBUG] Undo stack initialized")
         
         Task {
             await initializePipeline()
@@ -154,6 +165,18 @@ final class AppState {
             pipeline = try await SortAIPipeline(configuration: pipelineConfig)
             isInitialized = true
             modelStatus = .ready
+            
+            // Initialize SafeFileOrganizer with undo support using shared database
+            if let database = SortAIDatabase.sharedOrNil, let undoStack = undoStack {
+                safeOrganizer = SafeFileOrganizer(
+                    configuration: .default,
+                    database: database,
+                    undoStack: undoStack
+                )
+                NSLog("🔧 [DEBUG] SafeFileOrganizer initialized with undo support")
+            } else {
+                NSLog("⚠️ [DEBUG] SafeFileOrganizer not initialized - database or undoStack unavailable")
+            }
             
             // Display active provider info
             let preferenceDesc = appConfig.aiProvider.preference == .automatic 
@@ -465,7 +488,7 @@ final class AppState {
         }
     }
     
-    /// Organizes the file to its destination
+    /// Organizes the file to its destination using SafeFileOrganizer with undo support
     private func organizeItem(_ item: ProcessingItem) async throws {
         guard let output = outputFolder, let result = item.result else {
             return
@@ -474,21 +497,103 @@ final class AppState {
         item.status = .organizing
         item.progress = 0.9
         
-        let organizer = FileOrganizer()
-        let summary = try await organizer.organize(
-            results: [result],
-            to: output,
-            mode: organizationMode
-        )
-        
-        if summary.successCount > 0 {
-            item.status = .completed
-            item.progress = 1.0
-            successCount += 1
-            totalProcessed += 1
+        // Use SafeFileOrganizer if available, otherwise fall back to legacy FileOrganizer
+        if let safeOrganizer = safeOrganizer {
+            let fileUrl = result.signature.url
+            
+            // Build TaxonomyScannedFile from result
+            let fileAttributes = try? FileManager.default.attributesOfItem(atPath: fileUrl.path)
+            let scannedFile = TaxonomyScannedFile(
+                url: fileUrl,
+                filename: fileUrl.lastPathComponent,
+                fileExtension: fileUrl.pathExtension,
+                relativePath: fileUrl.lastPathComponent,
+                fileSize: fileAttributes?[.size] as? Int64 ?? 0,
+                createdAt: fileAttributes?[.creationDate] as? Date,
+                modifiedAt: fileAttributes?[.modificationDate] as? Date,
+                contentType: nil
+            )
+            
+            // Build a minimal taxonomy tree for the organization
+            let fullPath = result.brainResult.fullCategoryPath
+            let tree = TaxonomyTree(rootName: fullPath.root.isEmpty ? "Uncategorized" : fullPath.root)
+            
+            // Add subcategories to tree
+            var currentNode: TaxonomyNode = tree.root
+            for (index, component) in fullPath.components.enumerated() {
+                if index == 0 {
+                    // First component is the root, which is already set
+                    currentNode.name = component
+                } else {
+                    // Add child nodes for subsequent path components
+                    let childNode = TaxonomyNode(name: component)
+                    currentNode.addChild(childNode)
+                    currentNode = childNode
+                }
+            }
+            
+            // Build FileAssignment using the leaf node
+            let finalAssignment = FileAssignment(
+                fileId: scannedFile.id,
+                categoryId: currentNode.id,
+                url: fileUrl,
+                filename: fileUrl.lastPathComponent,
+                confidence: result.brainResult.confidence,
+                needsDeepAnalysis: false,
+                source: .filename
+            )
+            
+            // Determine LLM mode based on provider used
+            let llmMode: MovementLogEntry.LLMMode
+            switch actualProviderUsed {
+            case .appleIntelligence, .ollama, .openAI, .anthropic:
+                llmMode = .full
+            case .localML:
+                llmMode = .degraded
+            case nil:
+                llmMode = .offline
+            }
+            
+            let safeResult = try await safeOrganizer.organize(
+                files: [scannedFile],
+                assignments: [finalAssignment],
+                tree: tree,
+                outputFolder: output,
+                mode: llmMode,
+                provider: actualProviderUsed?.rawValue,
+                providerVersion: nil
+            )
+            
+            if safeResult.successCount > 0 {
+                item.status = .completed
+                item.progress = 1.0
+                successCount += 1
+                totalProcessed += 1
+                
+                // Update undo state
+                await updateUndoState()
+            } else {
+                item.status = .failed(safeResult.failed.first?.reason ?? "Organization failed")
+                failureCount += 1
+            }
         } else {
-            item.status = .failed("Organization failed")
-            failureCount += 1
+            // Fallback to legacy FileOrganizer
+            let organizer = FileOrganizer()
+            let summary = try await organizer.organize(
+                results: [result],
+                to: output,
+                mode: organizationMode
+            )
+            
+            if summary.successCount > 0 {
+                item.status = .completed
+                item.progress = 1.0
+                successCount += 1
+                totalProcessed += 1
+            } else {
+                item.status = .failed("Organization failed")
+                failureCount += 1
+            }
         }
     }
     
@@ -583,6 +688,66 @@ final class AppState {
         successCount = 0
         failureCount = 0
         totalProcessed = 0
+    }
+    
+    // MARK: - Undo/Redo Operations
+    
+    /// Update undo state from the undo stack
+    func updateUndoState() async {
+        guard let undoStack = undoStack else {
+            canUndoLastMove = false
+            canRedoLastMove = false
+            undoableOperationsCount = 0
+            return
+        }
+        
+        canUndoLastMove = await undoStack.canUndo
+        canRedoLastMove = await undoStack.canRedo
+        undoableOperationsCount = await undoStack.undoCount
+    }
+    
+    /// Undo the last file move operation
+    func undoLastMove() async {
+        guard let safeOrganizer = safeOrganizer else {
+            lastError = "Undo not available: organizer not initialized"
+            return
+        }
+        
+        do {
+            if let undoneCommand = try await safeOrganizer.undoLastOperation() {
+                NSLog("↩️ [AppState] Undone: %@", undoneCommand.description)
+                await updateUndoState()
+                
+                // Update success count since we reversed an operation
+                if successCount > 0 {
+                    successCount -= 1
+                }
+            }
+        } catch {
+            lastError = "Undo failed: \(error.localizedDescription)"
+            NSLog("❌ [AppState] Undo failed: %@", error.localizedDescription)
+        }
+    }
+    
+    /// Redo the last undone file move operation
+    func redoLastMove() async {
+        guard let safeOrganizer = safeOrganizer else {
+            lastError = "Redo not available: organizer not initialized"
+            return
+        }
+        
+        do {
+            if let redoneCommand = try await safeOrganizer.redoLastOperation() {
+                NSLog("↪️ [AppState] Redone: %@", redoneCommand.description)
+                await updateUndoState()
+                
+                // Update success count since we re-applied an operation
+                successCount += 1
+            }
+        } catch {
+            lastError = "Redo failed: \(error.localizedDescription)"
+            NSLog("❌ [AppState] Redo failed: %@", error.localizedDescription)
+        }
     }
     
     // MARK: - Selection Management
