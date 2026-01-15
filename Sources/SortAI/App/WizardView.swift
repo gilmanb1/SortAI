@@ -267,7 +267,6 @@ struct WizardView: View {
     // Services (injected or created)
     let scanner: FilenameScanner
     let fastTaxonomyBuilder: FastTaxonomyBuilder
-    let inferenceEngine: TaxonomyInferenceEngine?
     let organizationEngine: OrganizationEngine
     let deepAnalyzer: DeepAnalyzer?
     let backgroundAnalysisManager: BackgroundAnalysisManager?
@@ -277,7 +276,6 @@ struct WizardView: View {
         state: WizardState,
         scanner: FilenameScanner = FilenameScanner(),
         fastTaxonomyBuilder: FastTaxonomyBuilder = FastTaxonomyBuilder(),
-        inferenceEngine: TaxonomyInferenceEngine? = nil,
         organizationEngine: OrganizationEngine = OrganizationEngine(),
         deepAnalyzer: DeepAnalyzer? = nil,
         backgroundAnalysisManager: BackgroundAnalysisManager? = nil,
@@ -286,7 +284,6 @@ struct WizardView: View {
         self.state = state
         self.scanner = scanner
         self.fastTaxonomyBuilder = fastTaxonomyBuilder
-        self.inferenceEngine = inferenceEngine
         self.organizationEngine = organizationEngine
         self.deepAnalyzer = deepAnalyzer
         self.backgroundAnalysisManager = backgroundAnalysisManager
@@ -401,7 +398,7 @@ struct WizardView: View {
         case .scanning:
             ScanningStep(state: state, scanner: scanner)
         case .inferring:
-            InferringStep(state: state, fastBuilder: fastTaxonomyBuilder, legacyEngine: inferenceEngine)
+            InferringStep(state: state, fastBuilder: fastTaxonomyBuilder)
         case .verifyHierarchy:
             VerifyHierarchyStep(state: state, deepAnalyzer: deepAnalyzer)
         case .resolveConflicts:
@@ -781,18 +778,10 @@ struct SelectFolderStep: View {
                     
                     Divider()
                     
-                    Toggle("Enable deep analysis for low-confidence files", isOn: $state.enableDeepAnalysis)
-                    
-                    if state.enableDeepAnalysis {
-                        HStack {
-                            Text("Confidence threshold:")
-                            Slider(value: $state.confidenceThreshold, in: 0.5...0.95, step: 0.05)
-                            Text("\(Int(state.confidenceThreshold * 100))%")
-                                .monospacedDigit()
-                                .frame(width: 40)
-                        }
-                        .font(.caption)
-                    }
+                    Toggle("Enable deep content analysis (Phase 3)", isOn: $state.enableDeepAnalysis)
+                    Text("Analyzes file contents (text, audio, images) for better categorization. Slower but more accurate.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
                 .padding(8)
             }
@@ -923,7 +912,6 @@ struct ScanningStep: View {
 struct InferringStep: View {
     @Bindable var state: WizardState
     let fastBuilder: FastTaxonomyBuilder
-    let legacyEngine: TaxonomyInferenceEngine?
     
     var body: some View {
         VStack(spacing: 24) {
@@ -1159,16 +1147,20 @@ struct InferringStep: View {
             state.inferenceProgress = 0.7
         }
         
-        // ========== PHASE 3: Deep Content Analysis (on ALL files) ==========
-        NSLog("🔬 [WizardInfer] ========== PHASE 3: DEEP CONTENT ANALYSIS ==========")
-        NSLog("🔬 [WizardInfer] Running deep analysis on ALL files for content-based categorization")
-        await startFullDeepAnalysis()
+        // ========== PHASE 3: Deep Content Analysis (optional, on ALL files) ==========
+        if state.enableDeepAnalysis {
+            NSLog("🔬 [WizardInfer] ========== PHASE 3: DEEP CONTENT ANALYSIS ==========")
+            NSLog("🔬 [WizardInfer] Running deep analysis on ALL files for content-based categorization")
+            await startFullDeepAnalysis()
+        } else {
+            NSLog("ℹ️ [WizardInfer] Phase 3 (deep analysis) SKIPPED - disabled by user")
+        }
         
         // Allow user to proceed after all phases complete
         await MainActor.run {
             state.isProcessing = false
             state.inferenceProgress = 1.0
-            state.statusMessage = "All analysis complete!"
+            state.statusMessage = state.enableDeepAnalysis ? "All analysis complete!" : "Quick analysis complete!"
             NSLog("➡️ [WizardInfer] All phases complete - advancing to next step")
             state.goNext()
         }
@@ -1506,18 +1498,11 @@ struct VerifyHierarchyStep: View {
             
             Divider()
             
-            // Deep analysis toggle
-            Toggle("Auto-analyze low-confidence files", isOn: $state.enableDeepAnalysis)
-            
-            if state.enableDeepAnalysis {
-                HStack {
-                    Text("Threshold:")
-                    Slider(value: $state.confidenceThreshold, in: 0.5...0.95, step: 0.05)
-                    Text("\(Int(state.confidenceThreshold * 100))%")
-                        .monospacedDigit()
-                }
-                .padding(.leading)
-            }
+            // Deep analysis toggle (Phase 3)
+            Toggle("Deep content analysis", isOn: $state.enableDeepAnalysis)
+            Text("Extract text/audio from files for better accuracy (slower)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             
             Divider()
             

@@ -77,14 +77,9 @@ struct ContentView: View {
         let state = WizardState()
         let scanner = FilenameScanner()
         
-        // Create inference engine using provider preference from settings
-        let provider = createLLMProviderFromPreference()
-        let engine = TaxonomyInferenceEngine(provider: provider)
-        
         return WizardView(
             state: state,
-            scanner: scanner,
-            inferenceEngine: engine
+            scanner: scanner
         ) { taxonomy in
             // Mark first launch complete
             if isFirstLaunch {
